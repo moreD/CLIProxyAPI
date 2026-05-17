@@ -18,6 +18,7 @@ const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
 	schedulerStrategyFillFirst
+	schedulerStrategyStickyRoundRobin
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -37,6 +38,7 @@ type authScheduler struct {
 	providers     map[string]*providerScheduler
 	authProviders map[string]string
 	mixedCursors  map[string]int
+	mixedSticky   map[string]string
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -83,6 +85,7 @@ type readyBucket struct {
 type readyView struct {
 	flat         []*scheduledAuth
 	cursor       int
+	stickyAuthID string
 	parentOrder  []string
 	parentCursor int
 	children     map[string]*childBucket
@@ -99,6 +102,7 @@ type cooldownQueue []*scheduledAuth
 
 type readyViewCursorState struct {
 	cursor       int
+	stickyAuthID string
 	parentCursor int
 	childCursors map[string]int
 }
@@ -111,6 +115,7 @@ type readyBucketCursorState struct {
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
 	state := readyViewCursorState{
 		cursor:       view.cursor,
+		stickyAuthID: view.stickyAuthID,
 		parentCursor: view.parentCursor,
 	}
 	if len(view.children) == 0 {
@@ -133,6 +138,7 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 	if len(view.flat) > 0 {
 		view.cursor = normalizeCursor(state.cursor, len(view.flat))
 	}
+	view.stickyAuthID = state.stickyAuthID
 	if len(view.parentOrder) == 0 || len(view.children) == 0 {
 		return
 	}
@@ -170,6 +176,7 @@ func newAuthScheduler(selector Selector) *authScheduler {
 		providers:     make(map[string]*providerScheduler),
 		authProviders: make(map[string]string),
 		mixedCursors:  make(map[string]int),
+		mixedSticky:   make(map[string]string),
 	}
 }
 
@@ -178,6 +185,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *StickyRoundRobinSelector:
+		return schedulerStrategyStickyRoundRobin
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -194,6 +203,7 @@ func (s *authScheduler) setSelector(selector Selector) {
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
+	clear(s.mixedSticky)
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
@@ -206,6 +216,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
 	s.mixedCursors = make(map[string]int)
+	s.mixedSticky = make(map[string]string)
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
@@ -357,6 +368,11 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
+	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
+	if s.strategy == schedulerStrategyStickyRoundRobin {
+		return s.pickMixedStickyLocked(normalized, candidateShards, bestPriority, cursorKey, predicate)
+	}
+
 	if s.strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
@@ -371,7 +387,6 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
 	weights := make([]int, len(normalized))
 	segmentStarts := make([]int, len(normalized))
 	segmentEnds := make([]int, len(normalized))
@@ -425,6 +440,70 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+}
+
+type mixedReadyCandidate struct {
+	providerKey string
+	auth        *Auth
+	stickyKey   string
+}
+
+func mixedStickyKey(providerKey, authID string) string {
+	return providerKey + "\x00" + authID
+}
+
+func (s *authScheduler) pickMixedStickyLocked(normalized []string, candidateShards []*modelScheduler, bestPriority int, cursorKey string, predicate func(*scheduledAuth) bool) (*Auth, string, error) {
+	candidates := make([]mixedReadyCandidate, 0)
+	for providerIndex, providerKey := range normalized {
+		shard := candidateShards[providerIndex]
+		if shard == nil {
+			continue
+		}
+		entries := shard.readyEntriesAtPriorityLocked(false, bestPriority, predicate)
+		for _, entry := range entries {
+			if entry == nil || entry.auth == nil {
+				continue
+			}
+			candidates = append(candidates, mixedReadyCandidate{
+				providerKey: providerKey,
+				auth:        entry.auth,
+				stickyKey:   mixedStickyKey(providerKey, entry.auth.ID),
+			})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, "", &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	if s.mixedSticky == nil {
+		s.mixedSticky = make(map[string]string)
+	}
+	if s.mixedCursors == nil {
+		s.mixedCursors = make(map[string]int)
+	}
+	stickyKey := s.mixedSticky[cursorKey]
+	if stickyKey != "" {
+		for _, candidate := range candidates {
+			if candidate.stickyKey == stickyKey {
+				return candidate.auth, candidate.providerKey, nil
+			}
+		}
+		for index, candidate := range candidates {
+			if candidate.stickyKey > stickyKey {
+				s.mixedSticky[cursorKey] = candidate.stickyKey
+				s.mixedCursors[cursorKey] = index + 1
+				return candidate.auth, candidate.providerKey, nil
+			}
+		}
+	}
+	index := s.mixedCursors[cursorKey]
+	if index >= 2_147_483_640 {
+		index = 0
+	}
+	selectedIndex := index % len(candidates)
+	selected := candidates[selectedIndex]
+	s.mixedCursors[cursorKey] = selectedIndex + 1
+	s.mixedSticky[cursorKey] = selected.stickyKey
+	return selected.auth, selected.providerKey, nil
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -815,15 +894,40 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		view = &bucket.ws
 	}
 	var picked *scheduledAuth
-	if strategy == schedulerStrategyFillFirst {
+	switch strategy {
+	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
-	} else {
+	case schedulerStrategyStickyRoundRobin:
+		picked = view.pickStickyRoundRobin(predicate)
+	default:
 		picked = view.pickRoundRobin(predicate)
 	}
 	if picked == nil || picked.auth == nil {
 		return nil
 	}
 	return picked.auth
+}
+
+func (m *modelScheduler) readyEntriesAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) []*scheduledAuth {
+	if m == nil {
+		return nil
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return nil
+	}
+	view := &bucket.all
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
+		view = &bucket.ws
+	}
+	out := make([]*scheduledAuth, 0, len(view.flat))
+	for _, entry := range view.flat {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
@@ -1021,6 +1125,53 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
+		v.cursor = index + 1
+		return entry
+	}
+	return nil
+}
+
+// pickStickyRoundRobin keeps returning the sticky auth while it is ready. Once
+// that auth leaves the ready view, it advances to the next auth in stable order.
+func (v *readyView) pickStickyRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if len(v.flat) == 0 {
+		return nil
+	}
+	if v.stickyAuthID != "" {
+		for _, entry := range v.flat {
+			if entry == nil || entry.auth == nil || entry.auth.ID != v.stickyAuthID {
+				continue
+			}
+			if predicate == nil || predicate(entry) {
+				return entry
+			}
+		}
+		for index, entry := range v.flat {
+			if entry == nil || entry.auth == nil || entry.auth.ID <= v.stickyAuthID {
+				continue
+			}
+			if predicate != nil && !predicate(entry) {
+				continue
+			}
+			v.stickyAuthID = entry.auth.ID
+			v.cursor = index + 1
+			return entry
+		}
+	}
+	start := 0
+	if len(v.flat) > 0 {
+		start = v.cursor % len(v.flat)
+	}
+	for offset := 0; offset < len(v.flat); offset++ {
+		index := (start + offset) % len(v.flat)
+		entry := v.flat[index]
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		v.stickyAuthID = entry.auth.ID
 		v.cursor = index + 1
 		return entry
 	}

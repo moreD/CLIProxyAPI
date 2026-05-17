@@ -35,6 +35,15 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// StickyRoundRobinSelector keeps using the selected credential until it becomes
+// unavailable, then advances to the next credential in round-robin order.
+type StickyRoundRobinSelector struct {
+	mu      sync.Mutex
+	cursors map[string]int
+	sticky  map[string]string
+	maxKeys int
+}
+
 type blockReason int
 
 const (
@@ -366,6 +375,67 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+// Pick selects the current sticky credential while it remains available. When it
+// is no longer available, selection advances to the next credential by auth ID.
+func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	key := provider + ":" + canonicalModelKey(model)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cursors == nil {
+		s.cursors = make(map[string]int)
+	}
+	if s.sticky == nil {
+		s.sticky = make(map[string]string)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	s.ensureKeyCapacity(key, limit)
+
+	currentID := s.sticky[key]
+	if currentID != "" {
+		for _, candidate := range available {
+			if candidate != nil && candidate.ID == currentID {
+				return candidate, nil
+			}
+		}
+		for index, candidate := range available {
+			if candidate != nil && candidate.ID > currentID {
+				s.sticky[key] = candidate.ID
+				s.cursors[key] = index + 1
+				return candidate, nil
+			}
+		}
+	}
+
+	index := s.cursors[key]
+	if index >= 2_147_483_640 {
+		index = 0
+	}
+	selected := available[index%len(available)]
+	s.cursors[key] = index + 1
+	if selected != nil {
+		s.sticky[key] = selected.ID
+	}
+	return selected, nil
+}
+
+// ensureKeyCapacity ensures bounded cursor/sticky maps. Must be called with s.mu held.
+func (s *StickyRoundRobinSelector) ensureKeyCapacity(key string, limit int) {
+	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
+		s.cursors = make(map[string]int)
+		s.sticky = make(map[string]string)
+	}
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

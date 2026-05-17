@@ -408,6 +408,128 @@ func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	if manager.scheduler.strategy != schedulerStrategyFillFirst {
 		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyFillFirst)
 	}
+
+	manager.SetSelector(&StickyRoundRobinSelector{})
+	if manager.scheduler.strategy != schedulerStrategyStickyRoundRobin {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyStickyRoundRobin)
+	}
+}
+
+func TestSchedulerPick_StickyRoundRobinSticksUntilUnavailable(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&StickyRoundRobinSelector{},
+		&Auth{ID: "a", Provider: "gemini"},
+		&Auth{ID: "b", Provider: "gemini"},
+		&Auth{ID: "c", Provider: "gemini"},
+	)
+
+	for index := 0; index < 3; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() sticky a #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != "a" {
+			t.Fatalf("pickSingle() sticky a #%d auth = %v, want auth-a", index, got)
+		}
+	}
+
+	scheduler.upsertAuth(&Auth{ID: "a", Provider: "gemini", Disabled: true})
+	for index := 0; index < 2; index++ {
+		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() sticky b #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != "b" {
+			t.Fatalf("pickSingle() sticky b #%d auth = %v, want auth-b", index, got)
+		}
+	}
+
+	scheduler.upsertAuth(&Auth{ID: "b", Provider: "gemini", Disabled: true})
+	got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after b unavailable error = %v", errPick)
+	}
+	if got == nil || got.ID != "c" {
+		t.Fatalf("pickSingle() after b unavailable auth = %v, want auth-c", got)
+	}
+
+	scheduler.upsertAuth(&Auth{ID: "a", Provider: "gemini"})
+	got, errPick = scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after a returns error = %v", errPick)
+	}
+	if got == nil || got.ID != "c" {
+		t.Fatalf("pickSingle() after a returns auth = %v, want auth-c", got)
+	}
+}
+
+func TestManager_StickyRoundRobinAdvancesAfterCooldown(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	registerSchedulerModels(t, "gemini", model, "auth-a", "auth-b", "auth-c")
+	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	for _, authID := range []string{"auth-a", "auth-b", "auth-c"} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "gemini"}); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", authID, errRegister)
+		}
+	}
+
+	for index := 0; index < 2; index++ {
+		got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() sticky auth-a #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != "auth-a" {
+			t.Fatalf("pickSingle() sticky auth-a #%d auth = %v, want auth-a", index, got)
+		}
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "auth-a",
+		Provider: "gemini",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after auth-a cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-b" {
+		t.Fatalf("pickSingle() after auth-a cooldown auth = %v, want auth-b", got)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "auth-b",
+		Provider: "gemini",
+		Model:    model,
+		Success:  false,
+		Error:    &Error{HTTPStatus: 429, Message: "quota"},
+	})
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after auth-b cooldown error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-c" {
+		t.Fatalf("pickSingle() after auth-b cooldown auth = %v, want auth-c", got)
+	}
+
+	manager.MarkResult(context.Background(), Result{
+		AuthID:   "auth-a",
+		Provider: "gemini",
+		Model:    model,
+		Success:  true,
+	})
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "gemini", model, cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after auth-a recovers error = %v", errPick)
+	}
+	if got == nil || got.ID != "auth-c" {
+		t.Fatalf("pickSingle() after auth-a recovers auth = %v, want auth-c", got)
+	}
 }
 
 func TestManager_SchedulerTracksRegisterAndUpdate(t *testing.T) {
@@ -474,6 +596,55 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
 		}
+	}
+}
+
+func TestManager_PickNextMixed_StickyRoundRobinAdvancesAfterUnavailable(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	for _, auth := range []*Auth{
+		{ID: "gemini-a", Provider: "gemini"},
+		{ID: "gemini-b", Provider: "gemini"},
+		{ID: "claude-a", Provider: "claude"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	for index := 0; index < 2; index++ {
+		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() sticky gemini-a #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != "gemini-a" || provider != "gemini" {
+			t.Fatalf("pickNextMixed() sticky gemini-a #%d = auth %v provider %q, want gemini-a/gemini", index, got, provider)
+		}
+	}
+
+	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: "gemini-a", Provider: "gemini", Disabled: true}); errUpdate != nil {
+		t.Fatalf("Update(gemini-a) error = %v", errUpdate)
+	}
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() after gemini-a disabled error = %v", errPick)
+	}
+	if got == nil || got.ID != "gemini-b" || provider != "gemini" {
+		t.Fatalf("pickNextMixed() after gemini-a disabled = auth %v provider %q, want gemini-b/gemini", got, provider)
+	}
+
+	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: "gemini-b", Provider: "gemini", Disabled: true}); errUpdate != nil {
+		t.Fatalf("Update(gemini-b) error = %v", errUpdate)
+	}
+	got, _, provider, errPick = manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() after gemini-b disabled error = %v", errPick)
+	}
+	if got == nil || got.ID != "claude-a" || provider != "claude" {
+		t.Fatalf("pickNextMixed() after gemini-b disabled = auth %v provider %q, want claude-a/claude", got, provider)
 	}
 }
 

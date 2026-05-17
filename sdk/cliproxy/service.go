@@ -504,6 +504,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			return "fill-first"
+		case "sticky-round-robin", "stickyroundrobin", "sticky-rr", "srr", "round-robin-fill-first", "roundrobinfillfirst", "fill-round-robin", "fillroundrobin":
+			return "sticky-round-robin"
 		default:
 			return "round-robin"
 		}
@@ -523,6 +525,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		switch nextStrategy {
 		case "fill-first":
 			selector = &coreauth.FillFirstSelector{}
+		case "sticky-round-robin":
+			selector = &coreauth.StickyRoundRobinSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
