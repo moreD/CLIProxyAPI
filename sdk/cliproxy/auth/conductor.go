@@ -45,6 +45,12 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+// QuotaRefresher is implemented by executors that can refresh in-memory quota state.
+type QuotaRefresher interface {
+	RefreshQuota(ctx context.Context, auth *Auth) (*QuotaInfo, bool, error)
+	ProbeQuotaCountdown(ctx context.Context, auth *Auth) (*QuotaInfo, error)
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -74,6 +80,8 @@ const (
 	refreshIneffectiveBackoff = 30 * time.Second
 	quotaBackoffBase          = time.Second
 	quotaBackoffMax           = 30 * time.Minute
+	quotaRefreshInterval      = 15 * time.Minute
+	quotaRefreshRetryDelay    = 30 * time.Second
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -3752,6 +3760,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+	go m.runQuotaRefreshLoop(ctx, quotaRefreshInterval)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.

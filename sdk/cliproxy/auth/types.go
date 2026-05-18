@@ -92,6 +92,8 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+	// RuntimeQuota carries non-persisted quota state used by quota-aware routing.
+	RuntimeQuota *QuotaInfo `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -131,6 +133,72 @@ type QuotaState struct {
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+}
+
+// QuotaInfo contains in-memory Codex rolling-window quota state.
+type QuotaInfo struct {
+	FiveHour QuotaWindow `json:"five_hour"`
+	Weekly   QuotaWindow `json:"weekly"`
+}
+
+// QuotaWindow describes one rolling quota window.
+type QuotaWindow struct {
+	Used              int64     `json:"used"`
+	Limit             int64     `json:"limit"`
+	UsagePercent      float64   `json:"usage_percent"`
+	UsagePercentKnown bool      `json:"usage_percent_known,omitempty"`
+	NextFreshAt       time.Time `json:"next_fresh_at"`
+	RefreshedAt       time.Time `json:"refreshed_at"`
+}
+
+// Clone returns a deep copy of quota info.
+func (q *QuotaInfo) Clone() *QuotaInfo {
+	if q == nil {
+		return nil
+	}
+	copyQuota := *q
+	return &copyQuota
+}
+
+func (w QuotaWindow) known() bool {
+	return w.Used != 0 || w.Limit != 0 || w.UsagePercentKnown || w.UsagePercent != 0 || !w.NextFreshAt.IsZero() || !w.RefreshedAt.IsZero()
+}
+
+func (w QuotaWindow) remainingKnown() bool {
+	return w.UsagePercentKnown || w.UsagePercent != 0
+}
+
+// HasWeekly reports whether the weekly window has usable routing data.
+func (q *QuotaInfo) HasWeekly() bool {
+	return q != nil && q.Weekly.known()
+}
+
+// HasWeeklyRemaining reports whether weekly remaining quota is available for routing.
+func (q *QuotaInfo) HasWeeklyRemaining() bool {
+	return q != nil && q.Weekly.remainingKnown()
+}
+
+// HasAny reports whether either quota window has data.
+func (q *QuotaInfo) HasAny() bool {
+	return q != nil && (q.FiveHour.known() || q.Weekly.known())
+}
+
+// MergeQuotaInfo overlays known windows from update onto base.
+func MergeQuotaInfo(base, update *QuotaInfo) *QuotaInfo {
+	if base == nil {
+		return update.Clone()
+	}
+	merged := base.Clone()
+	if update == nil {
+		return merged
+	}
+	if update.FiveHour.known() {
+		merged.FiveHour = update.FiveHour
+	}
+	if update.Weekly.known() {
+		merged.Weekly = update.Weekly
+	}
+	return merged
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -240,6 +308,7 @@ func (a *Auth) Clone() *Auth {
 		}
 	}
 	copyAuth.Runtime = a.Runtime
+	copyAuth.RuntimeQuota = a.RuntimeQuota.Clone()
 	return &copyAuth
 }
 

@@ -487,23 +487,42 @@ func (s *authScheduler) pickMixedStickyLocked(normalized []string, candidateShar
 				return candidate.auth, candidate.providerKey, nil
 			}
 		}
-		for index, candidate := range candidates {
-			if candidate.stickyKey > stickyKey {
-				s.mixedSticky[cursorKey] = candidate.stickyKey
-				s.mixedCursors[cursorKey] = index + 1
-				return candidate.auth, candidate.providerKey, nil
-			}
+		if selectedIndex := bestMixedStickyCandidateIndex(candidates); selectedIndex >= 0 {
+			selected := candidates[selectedIndex]
+			s.mixedSticky[cursorKey] = selected.stickyKey
+			s.mixedCursors[cursorKey] = selectedIndex + 1
+			return selected.auth, selected.providerKey, nil
 		}
 	}
-	index := s.mixedCursors[cursorKey]
-	if index >= 2_147_483_640 {
-		index = 0
+	selectedIndex := bestMixedStickyCandidateIndex(candidates)
+	if selectedIndex < 0 {
+		return nil, "", &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
-	selectedIndex := index % len(candidates)
 	selected := candidates[selectedIndex]
 	s.mixedCursors[cursorKey] = selectedIndex + 1
 	s.mixedSticky[cursorKey] = selected.stickyKey
 	return selected.auth, selected.providerKey, nil
+}
+
+func bestMixedStickyCandidateIndex(candidates []mixedReadyCandidate) int {
+	best := -1
+	for index, candidate := range candidates {
+		if candidate.auth == nil {
+			continue
+		}
+		if best < 0 {
+			best = index
+			continue
+		}
+		if !quotaRankingKnown(candidate.auth) && !quotaRankingKnown(candidates[best].auth) {
+			continue
+		}
+		compared := compareQuotaForSticky(candidate.auth, candidates[best].auth)
+		if compared < 0 || compared == 0 && candidate.stickyKey < candidates[best].stickyKey {
+			best = index
+		}
+	}
+	return best
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -1146,36 +1165,36 @@ func (v *readyView) pickStickyRoundRobin(predicate func(*scheduledAuth) bool) *s
 				return entry
 			}
 		}
-		for index, entry := range v.flat {
-			if entry == nil || entry.auth == nil || entry.auth.ID <= v.stickyAuthID {
-				continue
-			}
-			if predicate != nil && !predicate(entry) {
-				continue
-			}
-			v.stickyAuthID = entry.auth.ID
+		if selected, index := v.bestStickyEntry(predicate); selected != nil {
+			v.stickyAuthID = selected.auth.ID
 			v.cursor = index + 1
-			return entry
+			return selected
 		}
 	}
-	start := 0
-	if len(v.flat) > 0 {
-		start = v.cursor % len(v.flat)
+	if selected, index := v.bestStickyEntry(predicate); selected != nil {
+		v.stickyAuthID = selected.auth.ID
+		v.cursor = index + 1
+		return selected
 	}
-	for offset := 0; offset < len(v.flat); offset++ {
-		index := (start + offset) % len(v.flat)
-		entry := v.flat[index]
+	return nil
+}
+
+func (v *readyView) bestStickyEntry(predicate func(*scheduledAuth) bool) (*scheduledAuth, int) {
+	bestIndex := -1
+	var best *scheduledAuth
+	for index, entry := range v.flat {
 		if entry == nil || entry.auth == nil {
 			continue
 		}
 		if predicate != nil && !predicate(entry) {
 			continue
 		}
-		v.stickyAuthID = entry.auth.ID
-		v.cursor = index + 1
-		return entry
+		if best == nil || compareQuotaForSticky(entry.auth, best.auth) < 0 {
+			best = entry
+			bestIndex = index
+		}
 	}
-	return nil
+	return best, bestIndex
 }
 
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.

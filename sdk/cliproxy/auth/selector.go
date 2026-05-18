@@ -409,21 +409,20 @@ func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model str
 				return candidate, nil
 			}
 		}
-		for index, candidate := range available {
-			if candidate != nil && candidate.ID > currentID {
-				s.sticky[key] = candidate.ID
-				s.cursors[key] = index + 1
-				return candidate, nil
-			}
+		if selectedIndex := bestStickyAuthIndex(available); selectedIndex >= 0 {
+			selected := available[selectedIndex]
+			s.sticky[key] = selected.ID
+			s.cursors[key] = selectedIndex + 1
+			return selected, nil
 		}
 	}
 
-	index := s.cursors[key]
-	if index >= 2_147_483_640 {
-		index = 0
+	selectedIndex := bestStickyAuthIndex(available)
+	if selectedIndex < 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	selected := available[index%len(available)]
-	s.cursors[key] = index + 1
+	selected := available[selectedIndex]
+	s.cursors[key] = selectedIndex + 1
 	if selected != nil {
 		s.sticky[key] = selected.ID
 	}

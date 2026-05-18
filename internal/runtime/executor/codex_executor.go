@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -33,6 +35,7 @@ const (
 	codexUserAgent             = "codex_cli_rs/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	codexOriginator            = "codex_cli_rs"
 	codexDefaultImageToolModel = "gpt-image-2"
+	codexQuotaUsageURL         = "https://chatgpt.com/backend-api/wham/usage"
 )
 
 var dataTag = []byte("data:")
@@ -567,6 +570,385 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
+}
+
+func (e *CodexExecutor) RefreshQuota(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.QuotaInfo, bool, error) {
+	apiKey, _ := codexCreds(auth)
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, false, fmt.Errorf("codex quota refresh: missing access token")
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, codexQuotaUsageURL, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	applyCodexQuotaUsageHeaders(httpReq, auth, apiKey)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close quota response body error: %v", errClose)
+		}
+	}()
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, false, err
+	}
+	quota, _ := parseCodexQuotaInfo(data, time.Now())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return quota, false, fmt.Errorf("codex quota refresh: status %d: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+	}
+	return quota, quota != nil && quota.HasAny(), nil
+}
+
+func (e *CodexExecutor) ProbeQuotaCountdown(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.QuotaInfo, error) {
+	apiKey, baseURL := codexCreds(auth)
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, fmt.Errorf("codex quota probe: missing access token")
+	}
+	if baseURL == "" {
+		baseURL = "https://chatgpt.com/backend-api/codex"
+	}
+	model := codexQuotaProbeModel(auth)
+	if model == "" {
+		return nil, fmt.Errorf("codex quota probe: no supported model")
+	}
+	body := codexQuotaProbePayload(model)
+	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close quota probe response body error: %v", errClose)
+		}
+	}()
+	data, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return nil, err
+	}
+	quota, _ := parseCodexQuotaInfo(data, time.Now())
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		return quota, fmt.Errorf("codex quota probe: status %d: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+	}
+	return quota, nil
+}
+
+func codexQuotaProbePayload(model string) []byte {
+	payload := []byte(fmt.Sprintf(`{"model":%q,"instructions":"Answer briefly.","input":"hello","stream":false}`, model))
+	body := sdktranslator.TranslateRequest(sdktranslator.FromString("openai-response"), sdktranslator.FromString("codex"), model, payload, false)
+	body, _ = sjson.SetBytes(body, "model", model)
+	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+	body, _ = sjson.DeleteBytes(body, "safety_identifier")
+	body, _ = sjson.DeleteBytes(body, "stream_options")
+	body = normalizeCodexInstructions(body)
+	return body
+}
+
+func applyCodexQuotaUsageHeaders(req *http.Request, auth *cliproxyauth.Auth, apiKey string) {
+	if req == nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", codexUserAgent)
+	if auth != nil && auth.Metadata != nil {
+		if accountID, ok := auth.Metadata["account_id"].(string); ok {
+			if accountID = strings.TrimSpace(accountID); accountID != "" {
+				req.Header.Set("Chatgpt-Account-Id", accountID)
+			}
+		}
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(req, attrs)
+}
+
+func codexQuotaProbeModel(auth *cliproxyauth.Auth) string {
+	models := registry.GetGlobalRegistry().GetModelsForClient(authID(auth))
+	if len(models) == 0 {
+		models = registry.GetCodexPlusModels()
+	}
+	var fallback string
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		lower := strings.ToLower(id)
+		if lower == "gpt-5.3-codex" {
+			return id
+		}
+		if fallback == "" && !strings.Contains(lower, "image") && !strings.Contains(lower, "review") {
+			fallback = id
+		}
+	}
+	return fallback
+}
+
+func authID(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return auth.ID
+}
+
+func parseCodexQuotaInfo(data []byte, now time.Time) (*cliproxyauth.QuotaInfo, bool) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, false
+	}
+	var root any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, false
+	}
+	if rootMap, ok := root.(map[string]any); ok {
+		if quota, okQuota := parseCodexTopLevelRateLimitQuota(rootMap, now); okQuota {
+			return quota, true
+		}
+	}
+	var quota cliproxyauth.QuotaInfo
+	parseCodexQuotaNode(root, "", &quota, now)
+	if !codexQuotaWindowKnown(quota.FiveHour) && !codexQuotaWindowKnown(quota.Weekly) {
+		return nil, false
+	}
+	return &quota, true
+}
+
+func parseCodexTopLevelRateLimitQuota(root map[string]any, now time.Time) (*cliproxyauth.QuotaInfo, bool) {
+	raw, ok := root["rate_limit"]
+	if !ok {
+		raw, ok = root["rateLimit"]
+	}
+	if !ok {
+		return nil, false
+	}
+	rateLimit, ok := raw.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	var quota cliproxyauth.QuotaInfo
+	if primary, okPrimary := firstMap(rateLimit, "primary_window", "primaryWindow"); okPrimary {
+		if window, okWindow := codexQuotaWindowFromMap(primary, "rate_limit.primary_window", now); okWindow {
+			quota.FiveHour = window
+		}
+	}
+	if secondary, okSecondary := firstMap(rateLimit, "secondary_window", "secondaryWindow"); okSecondary {
+		if window, okWindow := codexQuotaWindowFromMap(secondary, "rate_limit.secondary_window", now); okWindow {
+			quota.Weekly = window
+		}
+	}
+	if !codexQuotaWindowKnown(quota.FiveHour) && !codexQuotaWindowKnown(quota.Weekly) {
+		return nil, false
+	}
+	return &quota, true
+}
+
+func parseCodexQuotaNode(node any, path string, quota *cliproxyauth.QuotaInfo, now time.Time) {
+	switch typed := node.(type) {
+	case map[string]any:
+		if window, ok := codexQuotaWindowFromMap(typed, path, now); ok {
+			switch codexQuotaWindowKind(typed, path) {
+			case "five_hour":
+				quota.FiveHour = window
+			case "weekly":
+				quota.Weekly = window
+			}
+		}
+		for key, value := range typed {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			parseCodexQuotaNode(value, childPath, quota, now)
+		}
+	case []any:
+		for _, value := range typed {
+			parseCodexQuotaNode(value, path, quota, now)
+		}
+	}
+}
+
+func codexQuotaWindowFromMap(values map[string]any, path string, now time.Time) (cliproxyauth.QuotaWindow, bool) {
+	if codexQuotaWindowKind(values, path) == "" {
+		return cliproxyauth.QuotaWindow{}, false
+	}
+	window := cliproxyauth.QuotaWindow{}
+	if used, ok := firstInt64(values, "used", "used_tokens", "tokens_used", "current", "consumed"); ok {
+		window.Used = used
+	}
+	if limit, ok := firstInt64(values, "limit", "token_limit", "tokens_limit", "max", "total", "capacity"); ok {
+		window.Limit = limit
+	}
+	if usedPercent, ok := firstFloat64(values, "used_percent", "usedPercent"); ok {
+		window.UsagePercent = clampCodexRemainingPercent(100 - usedPercent)
+		window.UsagePercentKnown = true
+	} else if percent, ok := firstFloat64(values, "usage_percent", "usagePercent", "percent", "percentage", "remaining_percent", "remainingPercent", "percent_remaining", "percentRemaining"); ok {
+		window.UsagePercent = percent
+		window.UsagePercentKnown = true
+	}
+	if next, ok := firstTime(values, now, "next_fresh_at", "nextFreshAt", "resets_at", "resetsAt", "reset_at", "resetAt", "next_reset_at", "nextResetAt", "fresh_at", "freshAt"); ok {
+		window.NextFreshAt = next
+	} else if resetAfter, ok := firstFloat64(values, "reset_after_seconds", "resetAfterSeconds"); ok && resetAfter > 0 {
+		window.NextFreshAt = now.Add(time.Duration(resetAfter) * time.Second)
+	}
+	if refreshed, ok := firstTime(values, now, "refreshed_at", "refreshedAt", "updated_at", "updatedAt", "created_at", "createdAt"); ok {
+		window.RefreshedAt = refreshed
+	} else if window.Used != 0 || window.Limit != 0 || window.UsagePercentKnown || window.UsagePercent != 0 || !window.NextFreshAt.IsZero() {
+		window.RefreshedAt = now
+	}
+	return window, codexQuotaWindowKnown(window)
+}
+
+func clampCodexRemainingPercent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func codexQuotaWindowKind(values map[string]any, path string) string {
+	needle := strings.ToLower(strings.ReplaceAll(path, "-", "_"))
+	if raw, ok := values["window"]; ok {
+		needle += " " + strings.ToLower(strings.ReplaceAll(fmt.Sprint(raw), "-", "_"))
+	}
+	if raw, ok := values["name"]; ok {
+		needle += " " + strings.ToLower(strings.ReplaceAll(fmt.Sprint(raw), "-", "_"))
+	}
+	switch {
+	case strings.Contains(needle, "five_hour"), strings.Contains(needle, "5_hour"), strings.Contains(needle, "5h"), strings.Contains(needle, "primary"):
+		return "five_hour"
+	case strings.Contains(needle, "weekly"), strings.Contains(needle, "week"), strings.Contains(needle, "seven_day"), strings.Contains(needle, "7_day"), strings.Contains(needle, "7d"), strings.Contains(needle, "secondary"):
+		return "weekly"
+	default:
+		return ""
+	}
+}
+
+func codexQuotaWindowKnown(w cliproxyauth.QuotaWindow) bool {
+	return w.Used != 0 || w.Limit != 0 || w.UsagePercentKnown || w.UsagePercent != 0 || !w.NextFreshAt.IsZero() || !w.RefreshedAt.IsZero()
+}
+
+func firstInt64(values map[string]any, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		if raw, ok := values[key]; ok {
+			if value, okValue := anyToInt64(raw); okValue {
+				return value, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func firstMap(values map[string]any, keys ...string) (map[string]any, bool) {
+	for _, key := range keys {
+		if raw, ok := values[key]; ok {
+			if value, okValue := raw.(map[string]any); okValue {
+				return value, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func firstFloat64(values map[string]any, keys ...string) (float64, bool) {
+	for _, key := range keys {
+		if raw, ok := values[key]; ok {
+			if value, okValue := anyToFloat64(raw); okValue {
+				return value, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func firstTime(values map[string]any, now time.Time, keys ...string) (time.Time, bool) {
+	for _, key := range keys {
+		if raw, ok := values[key]; ok {
+			if value, okValue := anyToTime(raw, now); okValue {
+				return value, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func anyToInt64(raw any) (int64, bool) {
+	switch value := raw.(type) {
+	case float64:
+		return int64(value), true
+	case string:
+		if parsed, ok := anyToFloat64(value); ok {
+			return int64(parsed), true
+		}
+	}
+	return 0, false
+}
+
+func anyToFloat64(raw any) (float64, bool) {
+	switch value := raw.(type) {
+	case float64:
+		return value, true
+	case string:
+		trimmed := strings.TrimSpace(strings.TrimSuffix(value, "%"))
+		if trimmed == "" {
+			return 0, false
+		}
+		var parsed float64
+		if _, err := fmt.Sscanf(trimmed, "%f", &parsed); err != nil {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
+func anyToTime(raw any, now time.Time) (time.Time, bool) {
+	switch value := raw.(type) {
+	case float64:
+		if value <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(int64(value), 0), true
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed, true
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+			return parsed, true
+		}
+		var seconds float64
+		if _, err := fmt.Sscanf(trimmed, "%f", &seconds); err == nil && seconds > 0 {
+			return time.Unix(int64(seconds), 0), true
+		}
+	case bool:
+		if value {
+			return now, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {

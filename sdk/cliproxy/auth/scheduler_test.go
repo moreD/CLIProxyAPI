@@ -465,6 +465,115 @@ func TestSchedulerPick_StickyRoundRobinSticksUntilUnavailable(t *testing.T) {
 	}
 }
 
+func TestQuotaStickyRanking(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	unknown := &Auth{ID: "unknown"}
+	known := &Auth{ID: "known", RuntimeQuota: testQuota(now.Add(time.Hour), 10)}
+	if compareQuotaForSticky(known, unknown) >= 0 {
+		t.Fatalf("known quota should rank before unknown quota")
+	}
+	knownZeroRemaining := &Auth{ID: "known-zero", RuntimeQuota: testQuota(now.Add(time.Hour), 0)}
+	if compareQuotaForSticky(knownZeroRemaining, unknown) >= 0 {
+		t.Fatalf("known zero remaining quota should rank before unknown quota")
+	}
+	resetOnly := &Auth{ID: "reset-only", RuntimeQuota: &QuotaInfo{Weekly: QuotaWindow{NextFreshAt: now.Add(time.Hour)}}}
+	if compareQuotaForSticky(knownZeroRemaining, resetOnly) >= 0 {
+		t.Fatalf("reset-only quota should not be treated as known remaining quota")
+	}
+
+	early := &Auth{ID: "early", RuntimeQuota: testQuota(now.Add(time.Hour), 90)}
+	late := &Auth{ID: "late", RuntimeQuota: testQuota(now.Add(2*time.Hour), 5)}
+	if compareQuotaForSticky(early, late) >= 0 {
+		t.Fatalf("higher weekly remaining percentage should rank first")
+	}
+
+	laterReset := &Auth{ID: "b-later", RuntimeQuota: testQuota(now.Add(2*time.Hour), 80)}
+	earlierReset := &Auth{ID: "a-earlier", RuntimeQuota: testQuota(now.Add(time.Hour), 80)}
+	if compareQuotaForSticky(earlierReset, laterReset) >= 0 {
+		t.Fatalf("auth ID should break ties without considering weekly fresh time")
+	}
+
+	lowerRemaining := &Auth{ID: "lower", RuntimeQuota: testQuota(now.Add(time.Hour), 25)}
+	higherRemaining := &Auth{ID: "higher", RuntimeQuota: testQuota(now.Add(time.Hour), 80)}
+	if compareQuotaForSticky(higherRemaining, lowerRemaining) >= 0 {
+		t.Fatalf("higher weekly remaining percentage should rank first")
+	}
+
+	idA := &Auth{ID: "a", RuntimeQuota: testQuota(now.Add(time.Hour), 80)}
+	idB := &Auth{ID: "b", RuntimeQuota: testQuota(now.Add(time.Hour), 80)}
+	if compareQuotaForSticky(idA, idB) >= 0 {
+		t.Fatalf("auth ID should break equal quota ties")
+	}
+}
+
+func TestSchedulerPick_StickyRoundRobinUsesQuotaRankingForReplacement(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	scheduler := newSchedulerForTest(
+		&StickyRoundRobinSelector{},
+		&Auth{ID: "a", Provider: "codex", RuntimeQuota: testQuota(now.Add(time.Hour), 5)},
+		&Auth{ID: "b", Provider: "codex", RuntimeQuota: testQuota(now.Add(3*time.Hour), 10)},
+		&Auth{ID: "c", Provider: "codex", RuntimeQuota: testQuota(now.Add(2*time.Hour), 95)},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "c" {
+		t.Fatalf("pickSingle() startup auth = %v, want c", got)
+	}
+
+	scheduler.upsertAuth(&Auth{ID: "c", Provider: "codex", Disabled: true})
+	got, errPick = scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() after disable error = %v", errPick)
+	}
+	if got == nil || got.ID != "b" {
+		t.Fatalf("pickSingle() after disable auth = %v, want b", got)
+	}
+}
+
+func TestManager_PickNextMixed_StickyRoundRobinUsesQuotaRanking(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+	for _, auth := range []*Auth{
+		{ID: "gemini-a", Provider: "gemini", RuntimeQuota: testQuota(now.Add(time.Hour), 80)},
+		{ID: "claude-a", Provider: "claude", RuntimeQuota: testQuota(now.Add(2*time.Hour), 10)},
+		{ID: "gemini-b", Provider: "gemini"},
+	} {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if got == nil || got.ID != "gemini-a" || provider != "gemini" {
+		t.Fatalf("pickNextMixed() startup = auth %v provider %q, want gemini-a/gemini", got, provider)
+	}
+}
+
+func testQuota(nextFreshAt time.Time, remainingPercent float64) *QuotaInfo {
+	return &QuotaInfo{
+		Weekly: QuotaWindow{
+			UsagePercent:      remainingPercent,
+			UsagePercentKnown: true,
+			NextFreshAt:       nextFreshAt,
+			RefreshedAt:       nextFreshAt.Add(-time.Hour),
+		},
+	}
+}
+
 func TestManager_StickyRoundRobinAdvancesAfterCooldown(t *testing.T) {
 	t.Parallel()
 
