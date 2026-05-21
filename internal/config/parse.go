@@ -24,6 +24,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
+	cfg.ClientUsageStatisticsWindowSeconds = 7 * 24 * 60 * 60
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
@@ -67,6 +68,13 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	} else if cfg.RedisUsageQueueRetentionSeconds > 3600 {
 		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
 		cfg.RedisUsageQueueRetentionSeconds = 3600
+	}
+
+	if cfg.ClientUsageStatisticsWindowSeconds <= 0 {
+		cfg.ClientUsageStatisticsWindowSeconds = 7 * 24 * 60 * 60
+	} else if cfg.ClientUsageStatisticsWindowSeconds > 30*24*60*60 {
+		log.WithField("value", cfg.ClientUsageStatisticsWindowSeconds).Warn("client-usage-statistics-window-seconds too large; clamping to 2592000")
+		cfg.ClientUsageStatisticsWindowSeconds = 30 * 24 * 60 * 60
 	}
 
 	if cfg.MaxRetryCredentials < 0 {

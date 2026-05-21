@@ -757,11 +757,18 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	usage.StartDefault(ctx)
+	if s.cfg != nil {
+		redisqueue.SetUsageStatisticsEnabled(s.cfg.UsageStatisticsEnabled)
+		redisqueue.SetRetentionSeconds(s.cfg.RedisUsageQueueRetentionSeconds)
+		redisqueue.SetUsageStatsWindowSeconds(s.cfg.ClientUsageStatisticsWindowSeconds)
+	}
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
+		redisqueue.SetUsageStatsWindowSeconds(s.cfg.ClientUsageStatisticsWindowSeconds)
 	}
+	redisqueue.StartUsageStatsPersistence(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()

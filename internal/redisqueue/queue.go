@@ -7,9 +7,11 @@ import (
 )
 
 const (
-	defaultRetentionSeconds int64 = 60
-	maxRetentionSeconds     int64 = 3600
-	usageSubscriberBuffer         = 256
+	defaultRetentionSeconds        int64 = 60
+	maxRetentionSeconds            int64 = 3600
+	defaultUsageStatsWindowSeconds int64 = 7 * 24 * 60 * 60
+	maxUsageStatsWindowSeconds     int64 = 30 * 24 * 60 * 60
+	usageSubscriberBuffer                = 256
 )
 
 type queueItem struct {
@@ -26,19 +28,22 @@ type queue struct {
 }
 
 var (
-	enabled          atomic.Bool
-	retentionSeconds atomic.Int64
-	global           queue
+	enabled                 atomic.Bool
+	retentionSeconds        atomic.Int64
+	usageStatsWindowSeconds atomic.Int64
+	global                  queue
 )
 
 func init() {
 	retentionSeconds.Store(defaultRetentionSeconds)
+	usageStatsWindowSeconds.Store(defaultUsageStatsWindowSeconds)
 }
 
 func SetEnabled(value bool) {
 	enabled.Store(value)
 	if !value {
 		global.clear()
+		ClearUsageStats()
 	}
 }
 
@@ -54,6 +59,16 @@ func SetRetentionSeconds(value int) {
 		normalized = maxRetentionSeconds
 	}
 	retentionSeconds.Store(normalized)
+}
+
+func SetUsageStatsWindowSeconds(value int) {
+	normalized := int64(value)
+	if normalized <= 0 {
+		normalized = defaultUsageStatsWindowSeconds
+	} else if normalized > maxUsageStatsWindowSeconds {
+		normalized = maxUsageStatsWindowSeconds
+	}
+	usageStatsWindowSeconds.Store(normalized)
 }
 
 func Enqueue(payload []byte) {
@@ -203,10 +218,7 @@ func (q *queue) pruneLocked(now time.Time) {
 		return
 	}
 
-	windowSeconds := retentionSeconds.Load()
-	if windowSeconds <= 0 {
-		windowSeconds = defaultRetentionSeconds
-	}
+	windowSeconds := normalizedRetentionSeconds()
 	cutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
 	for q.head < len(q.items) && q.items[q.head].enqueuedAt.Before(cutoff) {
 		q.head++

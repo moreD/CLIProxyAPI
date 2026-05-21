@@ -142,20 +142,104 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginRecordsNonDestructiveClientUsageStats(t *testing.T) {
+	withEnabledQueue(t, func() {
+		SetUsageStatsWindowSeconds(7 * 24 * 60 * 60)
+
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:    "codex",
+			Model:       "gpt-5.3-codex",
+			Alias:       "codex",
+			APIKey:      "client-key",
+			RequestedAt: time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC),
+			Latency:     100 * time.Millisecond,
+			Detail: coreusage.Detail{
+				InputTokens:     100,
+				OutputTokens:    20,
+				CacheReadTokens: 70,
+				TotalTokens:     120,
+			},
+		})
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:    "codex",
+			Model:       "gpt-5.3-codex",
+			Alias:       "codex",
+			APIKey:      "client-key",
+			Failed:      true,
+			RequestedAt: time.Date(2026, 5, 20, 12, 1, 0, 0, time.UTC),
+			Latency:     200 * time.Millisecond,
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 5,
+				TotalTokens:  15,
+			},
+		})
+
+		first := UsageStatsSnapshotNow()
+		second := UsageStatsSnapshotNow()
+		if len(first.APIKeys) != 1 || len(second.APIKeys) != 1 {
+			t.Fatalf("snapshot api keys = %d/%d, want 1/1", len(first.APIKeys), len(second.APIKeys))
+		}
+		got := first.APIKeys[0]
+		if got.APIKey != "client-key" {
+			t.Fatalf("api key = %q, want client-key", got.APIKey)
+		}
+		if got.RequestCount != 2 || got.SuccessCount != 1 || got.FailureCount != 1 {
+			t.Fatalf("counts = request:%d success:%d failure:%d, want 2/1/1", got.RequestCount, got.SuccessCount, got.FailureCount)
+		}
+		if got.Tokens.TotalTokens != 135 || got.Tokens.ReadTokens != 110 || got.Tokens.WriteTokens != 25 {
+			t.Fatalf("tokens = %+v, want total 135 read 110 write 25", got.Tokens)
+		}
+		if got.Tokens.CacheReadTokens != 70 {
+			t.Fatalf("cache read tokens = %+v, want 70", got.Tokens)
+		}
+		rawTokens, errMarshal := json.Marshal(got.Tokens)
+		if errMarshal != nil {
+			t.Fatalf("marshal tokens: %v", errMarshal)
+		}
+		var tokenPayload map[string]any
+		if errUnmarshal := json.Unmarshal(rawTokens, &tokenPayload); errUnmarshal != nil {
+			t.Fatalf("unmarshal tokens: %v", errUnmarshal)
+		}
+		if _, ok := tokenPayload["cached_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include cached_tokens: %s", string(rawTokens))
+		}
+		if _, ok := tokenPayload["cache_creation_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include cache_creation_tokens: %s", string(rawTokens))
+		}
+		if _, ok := tokenPayload["input_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include input_tokens: %s", string(rawTokens))
+		}
+		if _, ok := tokenPayload["output_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include output_tokens: %s", string(rawTokens))
+		}
+		if len(got.ProviderStats) != 1 {
+			t.Fatalf("provider stats = %d, want 1", len(got.ProviderStats))
+		}
+		if second.APIKeys[0].RequestCount != got.RequestCount {
+			t.Fatalf("second snapshot request count = %d, want %d", second.APIKeys[0].RequestCount, got.RequestCount)
+		}
+	})
+}
+
 func withEnabledQueue(t *testing.T, fn func()) {
 	t.Helper()
 
 	prevQueueEnabled := Enabled()
 	prevUsageEnabled := UsageStatisticsEnabled()
+	prevStatsWindow := int(usageStatsWindowSeconds.Load())
 
 	SetEnabled(false)
 	SetEnabled(true)
 	SetUsageStatisticsEnabled(true)
+	ClearUsageStats()
 
 	defer func() {
 		SetEnabled(false)
 		SetEnabled(prevQueueEnabled)
 		SetUsageStatisticsEnabled(prevUsageEnabled)
+		SetUsageStatsWindowSeconds(prevStatsWindow)
 	}()
 
 	fn()

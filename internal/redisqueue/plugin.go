@@ -49,21 +49,15 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
 
 	tokens := tokenStats{
-		InputTokens:         record.Detail.InputTokens,
-		OutputTokens:        record.Detail.OutputTokens,
-		ReasoningTokens:     record.Detail.ReasoningTokens,
-		CachedTokens:        record.Detail.CachedTokens,
-		CacheReadTokens:     record.Detail.CacheReadTokens,
-		CacheCreationTokens: record.Detail.CacheCreationTokens,
-		TotalTokens:         record.Detail.TotalTokens,
+		ReadTokens:      record.Detail.InputTokens,
+		WriteTokens:     record.Detail.OutputTokens,
+		ReasoningTokens: record.Detail.ReasoningTokens,
+		CacheReadTokens: record.Detail.CacheReadTokens,
+		TotalTokens:     record.Detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
+		tokens.TotalTokens = tokens.ReadTokens + tokens.WriteTokens + tokens.ReasoningTokens
 	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
-	}
-
 	failed := record.Failed
 	if !failed {
 		failed = !resolveSuccess(ctx)
@@ -80,7 +74,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Fail:      fail,
 	}
 
-	payload, err := json.Marshal(queuedUsageDetail{
+	usageDetail := queuedUsageDetail{
 		requestDetail: detail,
 		Provider:      provider,
 		Model:         modelName,
@@ -89,7 +83,10 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AuthType:      authType,
 		APIKey:        apiKey,
 		RequestID:     requestID,
-	})
+	}
+	RecordUsageStat(usageDetail)
+
+	payload, err := json.Marshal(usageDetail)
 	if err != nil {
 		return
 	}
@@ -118,13 +115,11 @@ type requestDetail struct {
 }
 
 type tokenStats struct {
-	InputTokens         int64 `json:"input_tokens"`
-	OutputTokens        int64 `json:"output_tokens"`
-	ReasoningTokens     int64 `json:"reasoning_tokens"`
-	CachedTokens        int64 `json:"cached_tokens"`
-	CacheReadTokens     int64 `json:"cache_read_tokens"`
-	CacheCreationTokens int64 `json:"cache_creation_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	ReadTokens      int64 `json:"read_tokens"`
+	WriteTokens     int64 `json:"write_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+	TotalTokens     int64 `json:"total_tokens"`
 }
 
 type failDetail struct {

@@ -582,6 +582,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
+		mgmt.GET("/client-usage", s.mgmt.GetClientUsage)
 		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
@@ -1326,6 +1327,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
 		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
+	}
+
+	if oldCfg == nil || oldCfg.ClientUsageStatisticsWindowSeconds != cfg.ClientUsageStatisticsWindowSeconds {
+		redisqueue.SetUsageStatsWindowSeconds(cfg.ClientUsageStatisticsWindowSeconds)
 	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {

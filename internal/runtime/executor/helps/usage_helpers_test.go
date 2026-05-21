@@ -20,8 +20,8 @@ func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	if detail.TotalTokens != 3 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 3)
 	}
-	if detail.CachedTokens != 4 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 4)
+	if detail.CacheReadTokens != 4 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 4)
 	}
 	if detail.ReasoningTokens != 5 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 5)
@@ -40,8 +40,8 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	if detail.TotalTokens != 30 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 30)
 	}
-	if detail.CachedTokens != 7 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 7)
+	if detail.CacheReadTokens != 7 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 7)
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
@@ -78,8 +78,8 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	if detail.TotalTokens != 13 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 13)
 	}
-	if detail.CachedTokens != 3 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	if detail.CacheReadTokens != 3 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 3)
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
@@ -101,8 +101,8 @@ func TestParseGeminiCLIUsage_TopLevelUsageMetadata(t *testing.T) {
 	if detail.TotalTokens != 21 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 21)
 	}
-	if detail.CachedTokens != 5 {
-		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 5)
+	if detail.CacheReadTokens != 5 {
+		t.Fatalf("cache read tokens = %d, want %d", detail.CacheReadTokens, 5)
 	}
 }
 
@@ -172,7 +172,7 @@ func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{InputTokens: 2}); !ok {
 		t.Fatalf("expected non-zero input token usage to be recorded")
 	}
-	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CachedTokens: 2}); !ok {
-		t.Fatalf("expected non-zero cached token usage to be recorded")
+	if _, ok := reporter.buildAdditionalModelRecord("gpt-image-2", usage.Detail{CacheReadTokens: 2}); !ok {
+		t.Fatalf("expected non-zero cache read token usage to be recorded")
 	}
 }

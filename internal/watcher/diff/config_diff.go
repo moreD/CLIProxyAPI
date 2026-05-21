@@ -42,6 +42,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RedisUsageQueueRetentionSeconds != newCfg.RedisUsageQueueRetentionSeconds {
 		changes = append(changes, fmt.Sprintf("redis-usage-queue-retention-seconds: %d -> %d", oldCfg.RedisUsageQueueRetentionSeconds, newCfg.RedisUsageQueueRetentionSeconds))
 	}
+	if oldCfg.ClientUsageStatisticsWindowSeconds != newCfg.ClientUsageStatisticsWindowSeconds {
+		changes = append(changes, fmt.Sprintf("client-usage-statistics-window-seconds: %d -> %d", oldCfg.ClientUsageStatisticsWindowSeconds, newCfg.ClientUsageStatisticsWindowSeconds))
+	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}
