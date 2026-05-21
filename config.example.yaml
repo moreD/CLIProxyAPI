@@ -42,11 +42,17 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
-# API keys for authentication
+# API keys for client authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - name: "Alice"
+    api-key: "your-api-key-1"
+    token-limits:
+      12h: 1000000
+      7d: 10000000
+  - name: "Bob"
+    api-key: "your-api-key-2"
+  - name: "CI"
+    api-key: "your-api-key-3"
 
 # Enable debug logging
 debug: false
@@ -77,10 +83,6 @@ usage-statistics-enabled: false
 # Note: the in-process Redis RESP usage output is disabled when home.enabled is true.
 # Default: 60. Max: 3600.
 redis-usage-queue-retention-seconds: 60
-
-# Rolling window (in seconds) for non-destructive client API key usage statistics.
-# Default: 604800 (7 days). Max: 2592000 (30 days).
-client-usage-statistics-window-seconds: 604800
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.

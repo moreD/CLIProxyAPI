@@ -11,19 +11,20 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	Alias       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	AuthType    string
-	Source      string
-	RequestedAt time.Time
-	Latency     time.Duration
-	Failed      bool
-	Fail        Failure
-	Detail      Detail
+	Provider          string
+	Model             string
+	Alias             string
+	APIKey            string
+	AuthID            string
+	AuthIndex         string
+	AuthType          string
+	Source            string
+	SessionAffinityID string
+	RequestedAt       time.Time
+	Latency           time.Duration
+	Failed            bool
+	Fail              Failure
+	Detail            Detail
 }
 
 // Failure holds HTTP failure metadata for an upstream request attempt.
@@ -42,6 +43,7 @@ type Detail struct {
 }
 
 type requestedModelAliasContextKey struct{}
+type sessionAffinityIDContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -61,6 +63,34 @@ func RequestedModelAliasFromContext(ctx context.Context) string {
 		return ""
 	}
 	raw := ctx.Value(requestedModelAliasContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithSessionAffinityID stores the routing session-affinity id for usage sinks.
+func WithSessionAffinityID(ctx context.Context, sessionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionAffinityIDContextKey{}, sessionID)
+}
+
+// SessionAffinityIDFromContext returns the routing session-affinity id stored in ctx.
+func SessionAffinityIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(sessionAffinityIDContextKey{})
 	switch value := raw.(type) {
 	case string:
 		return strings.TrimSpace(value)

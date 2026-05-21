@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -204,6 +205,9 @@ type Server struct {
 // Returns:
 //   - *Server: A new server instance
 func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdkaccess.Manager, configFilePath string, opts ...ServerOption) *Server {
+	if cfg != nil {
+		redisqueue.SetClientTokenLimits(cfg.APIKeys)
+	}
 	optionState := &serverOptionConfig{
 		requestLoggerFactory: defaultRequestLoggerFactory,
 	}
@@ -1329,8 +1333,8 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	}
 
-	if oldCfg == nil || oldCfg.ClientUsageStatisticsWindowSeconds != cfg.ClientUsageStatisticsWindowSeconds {
-		redisqueue.SetUsageStatsWindowSeconds(cfg.ClientUsageStatisticsWindowSeconds)
+	if oldCfg == nil || !reflect.DeepEqual(oldCfg.APIKeys, cfg.APIKeys) {
+		redisqueue.SetClientTokenLimits(cfg.APIKeys)
 	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
@@ -1482,6 +1486,10 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+				if decision := redisqueue.CheckClientTokenLimit(result.Principal, time.Now()); decision.Exceeded {
+					abortWithClientUsageLimitExceeded(c, decision)
+					return
+				}
 			}
 			c.Next()
 			return
@@ -1493,6 +1501,102 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
+}
+
+func abortWithClientUsageLimitExceeded(c *gin.Context, decision redisqueue.ClientUsageLimitDecision) {
+	resetsInSeconds := clientUsageLimitResetsInSeconds(decision.ResetsAt, time.Now())
+	message := fmt.Sprintf(
+		"Client API key token limit exceeded for %s window: used %d of %d tokens. Resets at %s.",
+		decision.Window,
+		decision.Used,
+		decision.Limit,
+		decision.ResetsAt.UTC().Format(time.RFC3339),
+	)
+
+	path := ""
+	if c != nil && c.Request != nil && c.Request.URL != nil {
+		path = c.Request.URL.Path
+	}
+	if c != nil && resetsInSeconds > 0 {
+		c.Header("Retry-After", strconv.FormatInt(resetsInSeconds, 10))
+	}
+
+	switch {
+	case strings.Contains(path, "/v1/messages"):
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "rate_limit_error",
+				"message": message,
+			},
+		})
+	case strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") || strings.Contains(path, "/v1beta/"):
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"code":    http.StatusTooManyRequests,
+				"message": message,
+				"status":  "RESOURCE_EXHAUSTED",
+			},
+		})
+	case isCodexClientUsageLimitRequest(c, path):
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"message":           message,
+				"type":              "usage_limit_reached",
+				"code":              "usage_limit_exceeded",
+				"resets_at":         decision.ResetsAt.UTC().Unix(),
+				"resets_in_seconds": resetsInSeconds,
+			},
+		})
+	default:
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"message": message,
+				"type":    "insufficient_quota",
+				"param":   nil,
+				"code":    "insufficient_quota",
+			},
+		})
+	}
+}
+
+func clientUsageLimitResetsInSeconds(resetsAt time.Time, now time.Time) int64 {
+	if resetsAt.IsZero() {
+		return 0
+	}
+	remaining := resetsAt.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return int64((remaining + time.Second - 1) / time.Second)
+}
+
+func isCodexClientUsageLimitRequest(c *gin.Context, path string) bool {
+	if strings.Contains(path, "/backend-api/codex/") || path == "/backend-api/codex" {
+		return true
+	}
+	if c == nil || c.Request == nil {
+		return false
+	}
+	headers := c.Request.Header
+	for _, name := range []string{
+		"X-Codex-Beta-Features",
+		"X-Codex-Turn-Metadata",
+		"X-Codex-Turn-State",
+	} {
+		if strings.TrimSpace(headers.Get(name)) != "" {
+			return true
+		}
+	}
+	for _, value := range []string{
+		headers.Get("Originator"),
+		headers.Get("User-Agent"),
+	} {
+		if strings.Contains(strings.ToLower(value), "codex") {
+			return true
+		}
+	}
+	return false
 }
 
 func configuredSignatureCacheEnabled(cfg *config.Config) bool {

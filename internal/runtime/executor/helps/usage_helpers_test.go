@@ -159,6 +159,16 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 }
 
+func TestUsageReporterBuildRecordIncludesSessionAffinityID(t *testing.T) {
+	ctx := usage.WithSessionAffinityID(context.Background(), "codex:session-123")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.SessionAffinityID != "codex:session-123" {
+		t.Fatalf("session affinity id = %q, want %q", record.SessionAffinityID, "codex:session-123")
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",

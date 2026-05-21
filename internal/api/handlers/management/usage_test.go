@@ -72,7 +72,6 @@ func TestGetClientUsageReturnsNonDestructiveSnapshot(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	withManagementUsageQueue(t, func() {
 		redisqueue.SetUsageStatisticsEnabled(true)
-		redisqueue.SetUsageStatsWindowSeconds(7 * 24 * 60 * 60)
 
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
@@ -86,14 +85,23 @@ func TestGetClientUsageReturnsNonDestructiveSnapshot(t *testing.T) {
 		}
 
 		var payload struct {
-			WindowSeconds int64 `json:"window_seconds"`
-			APIKeys       []any `json:"api_keys"`
+			Windows struct {
+				TwelveHour struct {
+					Start string `json:"start"`
+					End   string `json:"end"`
+				} `json:"12h"`
+				SevenDay struct {
+					Start string `json:"start"`
+					End   string `json:"end"`
+				} `json:"7d"`
+			} `json:"windows"`
+			APIKeys []any `json:"api_keys"`
 		}
 		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &payload); errUnmarshal != nil {
 			t.Fatalf("unmarshal response: %v", errUnmarshal)
 		}
-		if payload.WindowSeconds != 7*24*60*60 {
-			t.Fatalf("window seconds = %d, want 604800", payload.WindowSeconds)
+		if payload.Windows.TwelveHour.Start == "" || payload.Windows.TwelveHour.End == "" || payload.Windows.SevenDay.Start == "" || payload.Windows.SevenDay.End == "" {
+			t.Fatalf("expected fixed usage windows in response: %+v", payload.Windows)
 		}
 		if len(payload.APIKeys) != 0 {
 			t.Fatalf("api keys = %d, want 0", len(payload.APIKeys))

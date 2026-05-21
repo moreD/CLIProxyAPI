@@ -760,13 +760,13 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.cfg != nil {
 		redisqueue.SetUsageStatisticsEnabled(s.cfg.UsageStatisticsEnabled)
 		redisqueue.SetRetentionSeconds(s.cfg.RedisUsageQueueRetentionSeconds)
-		redisqueue.SetUsageStatsWindowSeconds(s.cfg.ClientUsageStatisticsWindowSeconds)
+		redisqueue.SetClientTokenLimits(s.cfg.APIKeys)
 	}
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
-		redisqueue.SetUsageStatsWindowSeconds(s.cfg.ClientUsageStatisticsWindowSeconds)
+		redisqueue.SetClientTokenLimits(s.cfg.APIKeys)
 	}
 	redisqueue.StartUsageStatsPersistence(ctx)
 

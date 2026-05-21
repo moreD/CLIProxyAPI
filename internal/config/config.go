@@ -74,10 +74,6 @@ type Config struct {
 	// Default: 60. Max: 3600.
 	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
 
-	// ClientUsageStatisticsWindowSeconds controls the rolling in-memory statistics window
-	// for client API key usage totals. Default: 604800 (7 days). Max: 2592000 (30 days).
-	ClientUsageStatisticsWindowSeconds int `yaml:"client-usage-statistics-window-seconds" json:"client-usage-statistics-window-seconds"`
-
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -629,7 +625,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
-	cfg.ClientUsageStatisticsWindowSeconds = 7 * 24 * 60 * 60
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
@@ -699,16 +694,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.RedisUsageQueueRetentionSeconds = 3600
 	}
 
-	if cfg.ClientUsageStatisticsWindowSeconds <= 0 {
-		cfg.ClientUsageStatisticsWindowSeconds = 7 * 24 * 60 * 60
-	} else if cfg.ClientUsageStatisticsWindowSeconds > 30*24*60*60 {
-		log.WithField("value", cfg.ClientUsageStatisticsWindowSeconds).Warn("client-usage-statistics-window-seconds too large; clamping to 2592000")
-		cfg.ClientUsageStatisticsWindowSeconds = 30 * 24 * 60 * 60
-	}
-
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
 	}
+
+	cfg.APIKeys = NormalizeAPIKeyEntries(cfg.APIKeys)
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()

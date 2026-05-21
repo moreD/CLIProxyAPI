@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
@@ -144,16 +145,16 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 
 func TestUsageQueuePluginRecordsNonDestructiveClientUsageStats(t *testing.T) {
 	withEnabledQueue(t, func() {
-		SetUsageStatsWindowSeconds(7 * 24 * 60 * 60)
-
+		now := time.Now().UTC()
 		plugin := &usageQueuePlugin{}
 		plugin.HandleUsage(context.Background(), coreusage.Record{
-			Provider:    "codex",
-			Model:       "gpt-5.3-codex",
-			Alias:       "codex",
-			APIKey:      "client-key",
-			RequestedAt: time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC),
-			Latency:     100 * time.Millisecond,
+			Provider:          "codex",
+			Model:             "gpt-5.3-codex",
+			Alias:             "codex",
+			APIKey:            "client-key",
+			SessionAffinityID: "codex:session-1",
+			RequestedAt:       now.Add(-2 * time.Minute),
+			Latency:           100 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:     100,
 				OutputTokens:    20,
@@ -162,13 +163,14 @@ func TestUsageQueuePluginRecordsNonDestructiveClientUsageStats(t *testing.T) {
 			},
 		})
 		plugin.HandleUsage(context.Background(), coreusage.Record{
-			Provider:    "codex",
-			Model:       "gpt-5.3-codex",
-			Alias:       "codex",
-			APIKey:      "client-key",
-			Failed:      true,
-			RequestedAt: time.Date(2026, 5, 20, 12, 1, 0, 0, time.UTC),
-			Latency:     200 * time.Millisecond,
+			Provider:          "codex",
+			Model:             "gpt-5.3-codex",
+			Alias:             "codex",
+			APIKey:            "client-key",
+			SessionAffinityID: "codex:session-1",
+			Failed:            true,
+			RequestedAt:       now.Add(-time.Minute),
+			Latency:           200 * time.Millisecond,
 			Detail: coreusage.Detail{
 				InputTokens:  10,
 				OutputTokens: 5,
@@ -185,16 +187,17 @@ func TestUsageQueuePluginRecordsNonDestructiveClientUsageStats(t *testing.T) {
 		if got.APIKey != "client-key" {
 			t.Fatalf("api key = %q, want client-key", got.APIKey)
 		}
-		if got.RequestCount != 2 || got.SuccessCount != 1 || got.FailureCount != 1 {
-			t.Fatalf("counts = request:%d success:%d failure:%d, want 2/1/1", got.RequestCount, got.SuccessCount, got.FailureCount)
+		window := got.SevenDay
+		if window.RequestCount != 2 || window.SuccessCount != 1 || window.FailureCount != 1 {
+			t.Fatalf("counts = request:%d success:%d failure:%d, want 2/1/1", window.RequestCount, window.SuccessCount, window.FailureCount)
 		}
-		if got.Tokens.TotalTokens != 135 || got.Tokens.ReadTokens != 110 || got.Tokens.WriteTokens != 25 {
-			t.Fatalf("tokens = %+v, want total 135 read 110 write 25", got.Tokens)
+		if window.Tokens.TotalTokens != 1970 || window.Tokens.ReadTokens != 110 || window.Tokens.WriteTokens != 25 {
+			t.Fatalf("tokens = %+v, want weighted total 1970 read 110 write 25", window.Tokens)
 		}
-		if got.Tokens.CacheReadTokens != 70 {
-			t.Fatalf("cache read tokens = %+v, want 70", got.Tokens)
+		if window.Tokens.CacheReadTokens != 70 {
+			t.Fatalf("cache read tokens = %+v, want 70", window.Tokens)
 		}
-		rawTokens, errMarshal := json.Marshal(got.Tokens)
+		rawTokens, errMarshal := json.Marshal(window.Tokens)
 		if errMarshal != nil {
 			t.Fatalf("marshal tokens: %v", errMarshal)
 		}
@@ -214,13 +217,51 @@ func TestUsageQueuePluginRecordsNonDestructiveClientUsageStats(t *testing.T) {
 		if _, ok := tokenPayload["output_tokens"]; ok {
 			t.Fatalf("client usage stats unexpectedly include output_tokens: %s", string(rawTokens))
 		}
-		if len(got.ProviderStats) != 1 {
-			t.Fatalf("provider stats = %d, want 1", len(got.ProviderStats))
+		if len(window.ProviderStats) != 1 {
+			t.Fatalf("provider stats = %d, want 1", len(window.ProviderStats))
 		}
-		if second.APIKeys[0].RequestCount != got.RequestCount {
-			t.Fatalf("second snapshot request count = %d, want %d", second.APIKeys[0].RequestCount, got.RequestCount)
+		if got := window.ProviderStats[0].SessionAffinityID; got != "codex:session-1" {
+			t.Fatalf("session affinity id = %q, want codex:session-1", got)
+		}
+		if second.APIKeys[0].SevenDay.RequestCount != window.RequestCount {
+			t.Fatalf("second snapshot request count = %d, want %d", second.APIKeys[0].SevenDay.RequestCount, window.RequestCount)
 		}
 	})
+}
+
+func TestUsageQueuePluginRecordsStatsForTokenLimitsWhenQueueDisabled(t *testing.T) {
+	prevQueueEnabled := Enabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
+	SetEnabled(false)
+	SetUsageStatisticsEnabled(false)
+	SetClientTokenLimits([]config.APIKeyEntry{
+		{APIKey: "limited-key", TokenLimits: config.APIKeyTokenLimits{TwelveHour: 100}},
+	})
+	ClearUsageStats()
+	t.Cleanup(func() {
+		SetClientTokenLimits(nil)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
+		SetEnabled(prevQueueEnabled)
+		ClearUsageStats()
+	})
+
+	plugin := &usageQueuePlugin{}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "limited-key",
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 100,
+			TotalTokens: 100,
+		},
+	})
+
+	decision := CheckClientTokenLimit("limited-key", time.Now())
+	if !decision.Exceeded || decision.Window != "12h" || decision.Used != 1000 {
+		t.Fatalf("decision = %+v, want exceeded 12h at weighted 1000", decision)
+	}
+	if queued := PopOldest(10); len(queued) != 0 {
+		t.Fatalf("queue records = %d, want 0 when queue disabled", len(queued))
+	}
 }
 
 func withEnabledQueue(t *testing.T, fn func()) {
@@ -228,7 +269,6 @@ func withEnabledQueue(t *testing.T, fn func()) {
 
 	prevQueueEnabled := Enabled()
 	prevUsageEnabled := UsageStatisticsEnabled()
-	prevStatsWindow := int(usageStatsWindowSeconds.Load())
 
 	SetEnabled(false)
 	SetEnabled(true)
@@ -239,7 +279,6 @@ func withEnabledQueue(t *testing.T, fn func()) {
 		SetEnabled(false)
 		SetEnabled(prevQueueEnabled)
 		SetUsageStatisticsEnabled(prevUsageEnabled)
-		SetUsageStatsWindowSeconds(prevStatsWindow)
 	}()
 
 	fn()

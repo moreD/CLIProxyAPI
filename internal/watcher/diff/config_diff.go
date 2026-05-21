@@ -42,9 +42,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.RedisUsageQueueRetentionSeconds != newCfg.RedisUsageQueueRetentionSeconds {
 		changes = append(changes, fmt.Sprintf("redis-usage-queue-retention-seconds: %d -> %d", oldCfg.RedisUsageQueueRetentionSeconds, newCfg.RedisUsageQueueRetentionSeconds))
 	}
-	if oldCfg.ClientUsageStatisticsWindowSeconds != newCfg.ClientUsageStatisticsWindowSeconds {
-		changes = append(changes, fmt.Sprintf("client-usage-statistics-window-seconds: %d -> %d", oldCfg.ClientUsageStatisticsWindowSeconds, newCfg.ClientUsageStatisticsWindowSeconds))
-	}
 	if oldCfg.DisableCooling != newCfg.DisableCooling {
 		changes = append(changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling))
 	}
@@ -100,8 +97,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
 		changes = append(changes, fmt.Sprintf("api-keys count: %d -> %d", len(oldCfg.APIKeys), len(newCfg.APIKeys)))
-	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
+	} else if !reflect.DeepEqual(trimStrings(config.APIKeyValues(oldCfg.APIKeys)), trimStrings(config.APIKeyValues(newCfg.APIKeys))) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
+	} else if !reflect.DeepEqual(apiKeyEntryNames(oldCfg.APIKeys), apiKeyEntryNames(newCfg.APIKeys)) {
+		changes = append(changes, "api-keys: names updated")
+	} else if !reflect.DeepEqual(apiKeyTokenLimits(oldCfg.APIKeys), apiKeyTokenLimits(newCfg.APIKeys)) {
+		changes = append(changes, "api-keys: token limits updated")
 	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
 		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
@@ -402,6 +403,28 @@ func equalStringSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func apiKeyEntryNames(entries []config.APIKeyEntry) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, strings.TrimSpace(entry.Name))
+	}
+	return out
+}
+
+func apiKeyTokenLimits(entries []config.APIKeyEntry) []config.APIKeyTokenLimits {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]config.APIKeyTokenLimits, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.TokenLimits)
+	}
+	return out
 }
 
 // equalUpstreamAPIKeys compares two slices of AmpUpstreamAPIKeyEntry for equality.

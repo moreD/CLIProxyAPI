@@ -4,6 +4,13 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"encoding/json"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
@@ -31,8 +38,8 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
-	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// APIKeys is a list of named keys for authenticating clients to this proxy server.
+	APIKeys []APIKeyEntry `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
@@ -44,6 +51,115 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// APIKeyEntry is a client API key plus an optional operator-facing display name.
+type APIKeyEntry struct {
+	Name        string            `yaml:"name,omitempty" json:"name,omitempty"`
+	APIKey      string            `yaml:"api-key" json:"api-key"`
+	TokenLimits APIKeyTokenLimits `yaml:"token-limits,omitempty" json:"token-limits,omitempty"`
+}
+
+// APIKeyTokenLimits defines optional per-client API key token limits.
+type APIKeyTokenLimits struct {
+	TwelveHour int64 `yaml:"12h,omitempty" json:"12h,omitempty"`
+	SevenDay   int64 `yaml:"7d,omitempty" json:"7d,omitempty"`
+}
+
+func (l APIKeyTokenLimits) IsZero() bool {
+	return l.TwelveHour <= 0 && l.SevenDay <= 0
+}
+
+func (e *APIKeyEntry) UnmarshalYAML(value *yaml.Node) error {
+	if e == nil || value == nil {
+		return nil
+	}
+	if value.Kind == yaml.ScalarNode {
+		e.APIKey = strings.TrimSpace(value.Value)
+		e.Name = ""
+		e.TokenLimits = APIKeyTokenLimits{}
+		return nil
+	}
+	type rawAPIKeyEntry APIKeyEntry
+	var raw rawAPIKeyEntry
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	e.Name = strings.TrimSpace(raw.Name)
+	e.APIKey = strings.TrimSpace(raw.APIKey)
+	e.TokenLimits = normalizeAPIKeyTokenLimits(raw.TokenLimits)
+	return nil
+}
+
+func (e *APIKeyEntry) UnmarshalJSON(data []byte) error {
+	if e == nil {
+		return nil
+	}
+	var key string
+	if err := json.Unmarshal(data, &key); err == nil {
+		e.APIKey = strings.TrimSpace(key)
+		e.Name = ""
+		e.TokenLimits = APIKeyTokenLimits{}
+		return nil
+	}
+	type rawAPIKeyEntry APIKeyEntry
+	var raw rawAPIKeyEntry
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	e.Name = strings.TrimSpace(raw.Name)
+	e.APIKey = strings.TrimSpace(raw.APIKey)
+	e.TokenLimits = normalizeAPIKeyTokenLimits(raw.TokenLimits)
+	return nil
+}
+
+func NormalizeAPIKeyEntries(entries []APIKeyEntry) []APIKeyEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]APIKeyEntry, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		apiKey := strings.TrimSpace(entry.APIKey)
+		if apiKey == "" {
+			continue
+		}
+		if _, ok := seen[apiKey]; ok {
+			continue
+		}
+		seen[apiKey] = struct{}{}
+		out = append(out, APIKeyEntry{
+			Name:        strings.TrimSpace(entry.Name),
+			APIKey:      apiKey,
+			TokenLimits: normalizeAPIKeyTokenLimits(entry.TokenLimits),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeAPIKeyTokenLimits(limits APIKeyTokenLimits) APIKeyTokenLimits {
+	if limits.TwelveHour < 0 {
+		limits.TwelveHour = 0
+	}
+	if limits.SevenDay < 0 {
+		limits.SevenDay = 0
+	}
+	return limits
+}
+
+func APIKeyValues(entries []APIKeyEntry) []string {
+	entries = NormalizeAPIKeyEntries(entries)
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.APIKey)
+	}
+	return out
 }
 
 // StreamingConfig holds server streaming behavior configuration.

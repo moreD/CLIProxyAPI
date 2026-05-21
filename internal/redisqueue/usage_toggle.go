@@ -12,7 +12,7 @@ func init() {
 // This is controlled by the config field `usage-statistics-enabled` and the corresponding management API.
 func SetUsageStatisticsEnabled(enabled bool) {
 	usageStatisticsEnabled.Store(enabled)
-	if !enabled {
+	if !enabled && !clientTokenLimitsConfigured() {
 		ClearUsageStats()
 	}
 }

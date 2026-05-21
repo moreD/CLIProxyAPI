@@ -9,6 +9,8 @@ import internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 type SDKConfig = internalconfig.SDKConfig
 
 type Config = internalconfig.Config
+type APIKeyEntry = internalconfig.APIKeyEntry
+type APIKeyTokenLimits = internalconfig.APIKeyTokenLimits
 
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
@@ -42,6 +44,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 }
 
 func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }
+
+func APIKeyValues(entries []APIKeyEntry) []string { return internalconfig.APIKeyValues(entries) }
 
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return internalconfig.SaveConfigPreserveComments(configFile, cfg)

@@ -235,7 +235,7 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 }
 
 // GetAPIKeys fetches the list of API keys.
-// API returns {"api-keys": [...]}.
+// API returns {"api-keys": [{"name":"","api-key":"..."}]}.
 func (c *Client) GetAPIKeys() ([]string, error) {
 	wrapper, err := c.getJSON("/v0/management/api-keys")
 	if err != nil {
@@ -249,16 +249,27 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []string
-	if err := json.Unmarshal(raw, &result); err != nil {
+	var rawItems []any
+	if err := json.Unmarshal(raw, &rawItems); err != nil {
 		return nil, err
+	}
+	result := make([]string, 0, len(rawItems))
+	for _, item := range rawItems {
+		switch value := item.(type) {
+		case string:
+			result = append(result, value)
+		case map[string]any:
+			if key, ok := value["api-key"].(string); ok {
+				result = append(result, key)
+			}
+		}
 	}
 	return result, nil
 }
 
 // AddAPIKey adds a new API key by sending old=nil, new=key which appends.
 func (c *Client) AddAPIKey(key string) error {
-	body := map[string]any{"old": nil, "new": key}
+	body := map[string]any{"old": nil, "value": map[string]any{"api-key": key}}
 	jsonBody, _ := json.Marshal(body)
 	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err
@@ -266,7 +277,7 @@ func (c *Client) AddAPIKey(key string) error {
 
 // EditAPIKey replaces an API key at the given index.
 func (c *Client) EditAPIKey(index int, newValue string) error {
-	body := map[string]any{"index": index, "value": newValue}
+	body := map[string]any{"index": index, "value": map[string]any{"api-key": newValue}}
 	jsonBody, _ := json.Marshal(body)
 	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err

@@ -20,7 +20,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if p == nil {
 		return
 	}
-	if !Enabled() || !UsageStatisticsEnabled() {
+	publishQueue := Enabled() && UsageStatisticsEnabled()
+	if !publishQueue && !usageStatsTrackingEnabled() {
 		return
 	}
 
@@ -75,17 +76,21 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 
 	usageDetail := queuedUsageDetail{
-		requestDetail: detail,
-		Provider:      provider,
-		Model:         modelName,
-		Alias:         aliasName,
-		Endpoint:      resolveEndpoint(ctx),
-		AuthType:      authType,
-		APIKey:        apiKey,
-		RequestID:     requestID,
+		requestDetail:     detail,
+		Provider:          provider,
+		Model:             modelName,
+		Alias:             aliasName,
+		Endpoint:          resolveEndpoint(ctx),
+		AuthType:          authType,
+		APIKey:            apiKey,
+		RequestID:         requestID,
+		SessionAffinityID: strings.TrimSpace(record.SessionAffinityID),
 	}
 	RecordUsageStat(usageDetail)
 
+	if !publishQueue {
+		return
+	}
 	payload, err := json.Marshal(usageDetail)
 	if err != nil {
 		return
@@ -95,13 +100,14 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	Provider  string `json:"provider"`
-	Model     string `json:"model"`
-	Alias     string `json:"alias"`
-	Endpoint  string `json:"endpoint"`
-	AuthType  string `json:"auth_type"`
-	APIKey    string `json:"api_key"`
-	RequestID string `json:"request_id"`
+	Provider          string `json:"provider"`
+	Model             string `json:"model"`
+	Alias             string `json:"alias"`
+	Endpoint          string `json:"endpoint"`
+	AuthType          string `json:"auth_type"`
+	APIKey            string `json:"api_key"`
+	RequestID         string `json:"request_id"`
+	SessionAffinityID string `json:"session_affinity_id,omitempty"`
 }
 
 type requestDetail struct {

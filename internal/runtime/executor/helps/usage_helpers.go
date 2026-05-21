@@ -17,16 +17,17 @@ import (
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	alias       string
-	authID      string
-	authIndex   string
-	authType    string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider          string
+	model             string
+	alias             string
+	authID            string
+	authIndex         string
+	authType          string
+	apiKey            string
+	source            string
+	sessionAffinityID string
+	requestedAt       time.Time
+	once              sync.Once
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -36,13 +37,14 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		alias = model
 	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
+		provider:          provider,
+		model:             model,
+		alias:             strings.TrimSpace(alias),
+		sessionAffinityID: usage.SessionAffinityIDFromContext(ctx),
+		requestedAt:       time.Now(),
+		apiKey:            apiKey,
+		source:            resolveUsageSource(auth, apiKey),
+		authType:          resolveUsageAuthType(auth),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -148,19 +150,20 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       model,
-		Alias:       r.alias,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		AuthType:    r.authType,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Fail:        fail,
-		Detail:      detail,
+		Provider:          r.provider,
+		Model:             model,
+		Alias:             r.alias,
+		Source:            r.source,
+		SessionAffinityID: r.sessionAffinityID,
+		APIKey:            r.apiKey,
+		AuthID:            r.authID,
+		AuthIndex:         r.authIndex,
+		AuthType:          r.authType,
+		RequestedAt:       r.requestedAt,
+		Latency:           r.latency(),
+		Failed:            failed,
+		Fail:              fail,
+		Detail:            detail,
 	}
 }
 

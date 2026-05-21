@@ -867,7 +867,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	if executor == nil {
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
+	ctx = contextWithUsageMetadata(ctx, opts, routeModel)
 	var lastErr error
 	for idx, execModel := range execModels {
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
@@ -1366,7 +1366,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithUsageMetadata(execCtx, opts, routeModel)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1454,7 +1454,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
-		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
+		execCtx = contextWithUsageMetadata(execCtx, opts, routeModel)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1638,9 +1638,11 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 	}
 }
 
-func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
+func contextWithUsageMetadata(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
 	alias := requestedModelAliasFromOptions(opts, fallback)
-	return coreusage.WithRequestedModelAlias(ctx, alias)
+	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
+	sessionID := ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	return coreusage.WithSessionAffinityID(ctx, sessionID)
 }
 
 func requestedModelAliasFromOptions(opts cliproxyexecutor.Options, fallback string) string {
@@ -3652,7 +3654,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
 		}
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
-		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
+		creditsCtx = contextWithUsageMetadata(creditsCtx, creditsOpts, routeModel)
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth.ID)
 		models := m.executionModelCandidates(c.auth, routeModel)
 		if len(models) == 0 {
