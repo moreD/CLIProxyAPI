@@ -66,16 +66,61 @@ func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
 	})
 }
 
+func TestGetClientUsageReturnsNonDestructiveSnapshot(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	withManagementUsageQueue(t, func() {
+		redisqueue.SetUsageStatisticsEnabled(true)
+
+		rec := httptest.NewRecorder()
+		ginCtx, _ := gin.CreateTestContext(rec)
+		ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/client-usage", nil)
+
+		h := &Handler{}
+		h.GetClientUsage(ginCtx)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var payload struct {
+			Windows struct {
+				TwelveHour struct {
+					Start string `json:"start"`
+					End   string `json:"end"`
+				} `json:"12h"`
+				SevenDay struct {
+					Start string `json:"start"`
+					End   string `json:"end"`
+				} `json:"7d"`
+			} `json:"windows"`
+			APIKeys []any `json:"api_keys"`
+		}
+		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &payload); errUnmarshal != nil {
+			t.Fatalf("unmarshal response: %v", errUnmarshal)
+		}
+		if payload.Windows.TwelveHour.Start == "" || payload.Windows.TwelveHour.End == "" || payload.Windows.SevenDay.Start == "" || payload.Windows.SevenDay.End == "" {
+			t.Fatalf("expected fixed usage windows in response: %+v", payload.Windows)
+		}
+		if len(payload.APIKeys) != 0 {
+			t.Fatalf("api keys = %d, want 0", len(payload.APIKeys))
+		}
+	})
+}
+
 func withManagementUsageQueue(t *testing.T, fn func()) {
 	t.Helper()
 
 	prevQueueEnabled := redisqueue.Enabled()
+	prevUsageEnabled := redisqueue.UsageStatisticsEnabled()
 	redisqueue.SetEnabled(false)
 	redisqueue.SetEnabled(true)
+	redisqueue.SetUsageStatisticsEnabled(true)
+	redisqueue.ClearUsageStats()
 
 	defer func() {
 		redisqueue.SetEnabled(false)
 		redisqueue.SetEnabled(prevQueueEnabled)
+		redisqueue.SetUsageStatisticsEnabled(prevUsageEnabled)
 	}()
 
 	fn()

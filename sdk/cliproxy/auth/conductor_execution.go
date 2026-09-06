@@ -1616,6 +1616,14 @@ func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.O
 	if generate, ok := generateFromOptions(opts); ok {
 		ctx = coreusage.WithGenerate(ctx, generate)
 	}
+	primaryID, fallbackID := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	sessionID := primaryID
+	if sessionID == "" {
+		sessionID = fallbackID
+	}
+	if sessionID != "" {
+		ctx = coreusage.WithSessionAffinityID(ctx, sessionID)
+	}
 	ctx = coreusage.WithStream(ctx, opts.Stream)
 	return ctx
 }

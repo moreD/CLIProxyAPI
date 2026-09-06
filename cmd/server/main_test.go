@@ -34,12 +34,12 @@ func TestArgvEnablesBoolFlag(t *testing.T) {
 func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfgWithExampleKey := &config.Config{
 		SDKConfig: config.SDKConfig{
-			APIKeys: []string{"real-key", " your-api-key-1 "},
+			APIKeys: []config.APIKeyEntry{{APIKey: "real-key"}, {APIKey: " your-api-key-1 "}},
 		},
 	}
 	cfgWithRealKey := &config.Config{
 		SDKConfig: config.SDKConfig{
-			APIKeys: []string{"real-key"},
+			APIKeys: []config.APIKeyEntry{{APIKey: "real-key"}},
 		},
 	}
 

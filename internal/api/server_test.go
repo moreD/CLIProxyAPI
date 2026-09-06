@@ -609,7 +609,7 @@ func newTestServerWithOptions(t *testing.T, opts ...ServerOption) *Server {
 	t.Helper()
 	cfg := &proxyconfig.Config{
 		SDKConfig: sdkconfig.SDKConfig{
-			APIKeys: []string{"test-key"},
+			APIKeys: []sdkconfig.APIKeyEntry{{APIKey: "test-key"}},
 		},
 	}
 	return newTestServerWithConfig(t, cfg, opts...)
@@ -1828,6 +1828,140 @@ func TestHomeEnabledHidesManagementEndpointsAndControlPanel(t *testing.T) {
 	})
 }
 
+func TestClientUsageLimitExceededErrorFormats(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	decision := redisqueue.ClientUsageLimitDecision{
+		Exceeded: true,
+		Window:   "12h",
+		Used:     101,
+		Limit:    100,
+		ResetsAt: time.Now().Add(30 * time.Minute),
+	}
+
+	tests := []struct {
+		name     string
+		path     string
+		headers  map[string]string
+		validate func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any)
+	}{
+		{
+			name: "openai chat completions uses insufficient quota",
+			path: "/v1/chat/completions",
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				errObj := payload["error"].(map[string]any)
+				if errObj["type"] != "insufficient_quota" || errObj["code"] != "insufficient_quota" {
+					t.Fatalf("openai error = %#v, want insufficient_quota", errObj)
+				}
+				if _, ok := errObj["param"]; !ok || errObj["param"] != nil {
+					t.Fatalf("openai param = %#v, want null", errObj["param"])
+				}
+			},
+		},
+		{
+			name: "openai responses stays openai shaped without codex headers",
+			path: "/v1/responses",
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				errObj := payload["error"].(map[string]any)
+				if errObj["type"] != "insufficient_quota" || errObj["code"] != "insufficient_quota" {
+					t.Fatalf("openai responses error = %#v, want insufficient_quota", errObj)
+				}
+			},
+		},
+		{
+			name: "codex cli responses uses usage limit reached",
+			path: "/v1/responses",
+			headers: map[string]string{
+				"Originator": "codex_cli_rs",
+			},
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				errObj := payload["error"].(map[string]any)
+				if errObj["type"] != "usage_limit_reached" || errObj["code"] != "usage_limit_exceeded" {
+					t.Fatalf("codex error = %#v, want usage_limit_reached/usage_limit_exceeded", errObj)
+				}
+				if got, ok := errObj["resets_at"].(float64); !ok || got <= 0 {
+					t.Fatalf("codex resets_at = %#v, want positive unix seconds", errObj["resets_at"])
+				}
+				if got, ok := errObj["resets_in_seconds"].(float64); !ok || got <= 0 {
+					t.Fatalf("codex resets_in_seconds = %#v, want positive seconds", errObj["resets_in_seconds"])
+				}
+			},
+		},
+		{
+			name: "codex responses beta header uses usage limit reached",
+			path: "/v1/responses",
+			headers: map[string]string{
+				"X-Codex-Beta-Features": "responses_websockets=2026-02-06",
+			},
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				errObj := payload["error"].(map[string]any)
+				if errObj["type"] != "usage_limit_reached" || errObj["code"] != "usage_limit_exceeded" {
+					t.Fatalf("codex beta header error = %#v, want usage_limit_reached/usage_limit_exceeded", errObj)
+				}
+			},
+		},
+		{
+			name: "codex direct route uses usage limit reached",
+			path: "/backend-api/codex/responses",
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				errObj := payload["error"].(map[string]any)
+				if errObj["type"] != "usage_limit_reached" || errObj["code"] != "usage_limit_exceeded" {
+					t.Fatalf("codex direct error = %#v, want usage_limit_reached/usage_limit_exceeded", errObj)
+				}
+			},
+		},
+		{
+			name: "anthropic messages uses anthropic error envelope",
+			path: "/v1/messages",
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				if payload["type"] != "error" {
+					t.Fatalf("anthropic top-level type = %#v, want error", payload["type"])
+				}
+				errObj := payload["error"].(map[string]any)
+				if errObj["type"] != "rate_limit_error" {
+					t.Fatalf("anthropic error = %#v, want rate_limit_error", errObj)
+				}
+			},
+		},
+		{
+			name: "gemini generate content uses google resource exhausted",
+			path: "/v1beta/models/gemini-pro:generateContent",
+			validate: func(t *testing.T, rr *httptest.ResponseRecorder, payload map[string]any) {
+				errObj := payload["error"].(map[string]any)
+				if errObj["status"] != "RESOURCE_EXHAUSTED" || errObj["code"] != float64(http.StatusTooManyRequests) {
+					t.Fatalf("gemini error = %#v, want RESOURCE_EXHAUSTED/429", errObj)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rr)
+			req := httptest.NewRequest(http.MethodPost, tt.path, nil)
+			for key, value := range tt.headers {
+				req.Header.Set(key, value)
+			}
+			c.Request = req
+
+			abortWithClientUsageLimitExceeded(c, decision)
+
+			if rr.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusTooManyRequests, rr.Body.String())
+			}
+			if got := rr.Header().Get("Retry-After"); got == "" {
+				t.Fatalf("Retry-After header is empty")
+			}
+			var payload map[string]any
+			if errUnmarshal := json.Unmarshal(rr.Body.Bytes(), &payload); errUnmarshal != nil {
+				t.Fatalf("unmarshal response: %v body=%s", errUnmarshal, rr.Body.String())
+			}
+			tt.validate(t, rr, payload)
+		})
+	}
+}
+
 func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 	staticDir := t.TempDir()
@@ -1838,7 +1972,7 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 
 	server := newTestServerWithOptions(t, WithExampleAPIKeySafeMode())
 	cfg := *server.cfg
-	cfg.APIKeys = []string{"your-api-key-1"}
+	cfg.APIKeys = []proxyconfig.APIKeyEntry{{APIKey: "your-api-key-1"}}
 	server.UpdateClients(&cfg)
 
 	t.Run("root warning page includes management link", func(t *testing.T) {
@@ -1934,7 +2068,7 @@ func TestExampleAPIKeySafeModeShowsWarningAndKeepsManagement(t *testing.T) {
 
 	t.Run("safe mode clears after key update", func(t *testing.T) {
 		nextCfg := cfg
-		nextCfg.APIKeys = []string{"real-key"}
+		nextCfg.APIKeys = []proxyconfig.APIKeyEntry{{APIKey: "real-key"}}
 		server.UpdateClients(&nextCfg)
 
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -2066,7 +2200,6 @@ func TestModelsDispatchByAnthropicVersionHeader(t *testing.T) {
 		}
 	})
 }
-
 func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-claude-model-list-cloaking-hot-reload"
@@ -2116,7 +2249,6 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 
 	assertModelID(modelID)
 }
-
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"

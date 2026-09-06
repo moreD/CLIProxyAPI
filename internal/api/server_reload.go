@@ -94,6 +94,10 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	}
 
+	if oldCfg == nil || !clientCostLimitEntriesEqual(oldCfg.APIKeys, cfg.APIKeys) {
+		redisqueue.SetClientCostLimits(cfg.APIKeys)
+	}
+
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
 		if setter, ok := s.requestLogger.(interface{ SetErrorLogsMaxFiles(int) }); ok {
 			setter.SetErrorLogsMaxFiles(cfg.ErrorLogsMaxFiles)
@@ -240,6 +244,20 @@ func (s *Server) UpdateClientsContext(ctx context.Context, cfg *config.Config) b
 		openAICompatCount,
 	)
 	return ctx.Err() == nil
+}
+
+func clientCostLimitEntriesEqual(a, b []config.APIKeyEntry) bool {
+	a = config.NormalizeAPIKeyEntries(a)
+	b = config.NormalizeAPIKeyEntries(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].APIKey != b[i].APIKey || a[i].CostLimits != b[i].CostLimits {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) SetWebsocketAuthChangeHandler(fn func(bool, bool)) {

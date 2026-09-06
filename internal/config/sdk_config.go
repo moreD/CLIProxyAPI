@@ -4,6 +4,14 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"encoding/json"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
 	// CodexResponseSteering mirrors the provider-wide runtime setting for API handlers.
@@ -54,8 +62,8 @@ type SDKConfig struct {
 	// ClaudeCode configures Claude Code compatibility behavior.
 	ClaudeCode ClaudeCodeConfig `yaml:"claude-code" json:"claude-code"`
 
-	// APIKeys is a list of keys for authenticating clients to this proxy server.
-	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+	// APIKeys is a list of named keys for authenticating clients to this proxy server.
+	APIKeys []APIKeyEntry `yaml:"api-keys" json:"api-keys"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
@@ -67,6 +75,143 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// APIKeyEntry is a client API key plus an optional operator-facing display name.
+type APIKeyEntry struct {
+	Name       string           `yaml:"name,omitempty" json:"name,omitempty"`
+	APIKey     string           `yaml:"api-key" json:"api-key"`
+	CostLimits APIKeyCostLimits `yaml:"cost-limits,omitempty" json:"cost-limits,omitempty"`
+}
+
+// APIKeyCostLimits defines optional per-client API key limits in USD.
+type APIKeyCostLimits struct {
+	TwelveHour billing.USD `yaml:"12h,omitempty" json:"12h,omitempty"`
+	SevenDay   billing.USD `yaml:"7d,omitempty" json:"7d,omitempty"`
+}
+
+func (l APIKeyCostLimits) IsZero() bool {
+	return l.TwelveHour <= 0 && l.SevenDay <= 0
+}
+
+func (e *APIKeyEntry) UnmarshalYAML(value *yaml.Node) error {
+	if e == nil || value == nil {
+		return nil
+	}
+	if value.Kind == yaml.ScalarNode {
+		e.APIKey = strings.TrimSpace(value.Value)
+		e.Name = ""
+		e.CostLimits = APIKeyCostLimits{}
+		return nil
+	}
+	type rawAPIKeyEntry APIKeyEntry
+	var raw rawAPIKeyEntry
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	var legacy struct {
+		Limits map[string]int64 `yaml:"token-limits"`
+	}
+	if err := value.Decode(&legacy); err != nil {
+		return err
+	}
+	hasTokenLimits := false
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value == "cost-limits" {
+			hasTokenLimits = true
+		}
+	}
+	if !hasTokenLimits {
+		raw.CostLimits = APIKeyCostLimits{TwelveHour: billing.LegacyLimit(legacy.Limits["12h"]), SevenDay: billing.LegacyLimit(legacy.Limits["7d"])}
+	}
+	e.Name = strings.TrimSpace(raw.Name)
+	e.APIKey = strings.TrimSpace(raw.APIKey)
+	e.CostLimits = normalizeAPIKeyCostLimits(raw.CostLimits)
+	return nil
+}
+
+func (e *APIKeyEntry) UnmarshalJSON(data []byte) error {
+	if e == nil {
+		return nil
+	}
+	var key string
+	if err := json.Unmarshal(data, &key); err == nil {
+		e.APIKey = strings.TrimSpace(key)
+		e.Name = ""
+		e.CostLimits = APIKeyCostLimits{}
+		return nil
+	}
+	type rawAPIKeyEntry APIKeyEntry
+	var raw rawAPIKeyEntry
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if _, present := fields["cost-limits"]; !present {
+		var legacy map[string]int64
+		if value, ok := fields["token-limits"]; ok {
+			if err := json.Unmarshal(value, &legacy); err != nil {
+				return err
+			}
+			raw.CostLimits = APIKeyCostLimits{TwelveHour: billing.LegacyLimit(legacy["12h"]), SevenDay: billing.LegacyLimit(legacy["7d"])}
+		}
+	}
+	e.Name = strings.TrimSpace(raw.Name)
+	e.APIKey = strings.TrimSpace(raw.APIKey)
+	e.CostLimits = normalizeAPIKeyCostLimits(raw.CostLimits)
+	return nil
+}
+
+func NormalizeAPIKeyEntries(entries []APIKeyEntry) []APIKeyEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]APIKeyEntry, 0, len(entries))
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		apiKey := strings.TrimSpace(entry.APIKey)
+		if apiKey == "" {
+			continue
+		}
+		if _, ok := seen[apiKey]; ok {
+			continue
+		}
+		seen[apiKey] = struct{}{}
+		out = append(out, APIKeyEntry{
+			Name:       strings.TrimSpace(entry.Name),
+			APIKey:     apiKey,
+			CostLimits: normalizeAPIKeyCostLimits(entry.CostLimits),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeAPIKeyCostLimits(limits APIKeyCostLimits) APIKeyCostLimits {
+	if limits.TwelveHour < 0 {
+		limits.TwelveHour = 0
+	}
+	if limits.SevenDay < 0 {
+		limits.SevenDay = 0
+	}
+	return limits
+}
+
+func APIKeyValues(entries []APIKeyEntry) []string {
+	entries = NormalizeAPIKeyEntries(entries)
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, entry.APIKey)
+	}
+	return out
 }
 
 // ClaudeCodeConfig configures Claude Code compatibility behavior.

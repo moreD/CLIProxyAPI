@@ -44,6 +44,7 @@ func SetEnabled(value bool) {
 	enabled.Store(value)
 	if !value {
 		global.clear()
+		ClearUsageStats()
 		errorGlobal.clear()
 	}
 }
@@ -230,10 +231,7 @@ func (q *queue) pruneLocked(now time.Time) {
 		return
 	}
 
-	windowSeconds := retentionSeconds.Load()
-	if windowSeconds <= 0 {
-		windowSeconds = defaultRetentionSeconds
-	}
+	windowSeconds := normalizedRetentionSeconds()
 	cutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
 	for q.head < len(q.items) && q.items[q.head].enqueuedAt.Before(cutoff) {
 		q.head++

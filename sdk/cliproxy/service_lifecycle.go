@@ -50,11 +50,18 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	usage.StartDefault(ctx)
+	if s.cfg != nil {
+		redisqueue.SetUsageStatisticsEnabled(s.cfg.UsageStatisticsEnabled)
+		redisqueue.SetRetentionSeconds(s.cfg.RedisUsageQueueRetentionSeconds)
+		redisqueue.SetClientCostLimits(s.cfg.APIKeys)
+	}
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
 	if homeEnabled {
 		forceHomeRuntimeConfig(s.cfg)
 		redisqueue.SetUsageStatisticsEnabled(true)
+		redisqueue.SetClientCostLimits(s.cfg.APIKeys)
 	}
+	redisqueue.StartUsageStatsPersistence(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -234,6 +241,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		if errPersist := redisqueue.FlushUsageStats(); errPersist != nil {
+			log.Errorf("failed to persist client usage stats before shutdown: %v", errPersist)
+			shutdownErr = fmt.Errorf("persist client usage stats before shutdown: %w", errPersist)
+		}
 
 		s.homeLifecycleMu.Lock()
 		if supervisor := s.homeSupervisor; supervisor != nil {
@@ -332,6 +343,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				if shutdownErr == nil {
 					shutdownErr = err
 				}
+			}
+		}
+		if errPersist := redisqueue.FlushUsageStats(); errPersist != nil {
+			log.Errorf("failed to persist client usage stats after stopping API server: %v", errPersist)
+			if shutdownErr == nil {
+				shutdownErr = fmt.Errorf("persist client usage stats after stopping API server: %w", errPersist)
 			}
 		}
 

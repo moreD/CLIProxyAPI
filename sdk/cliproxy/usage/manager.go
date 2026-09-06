@@ -30,8 +30,10 @@ type Record struct {
 	APIKey          string
 	SessionID       string
 	ParentSessionID string
-	AuthID          string
-	AuthIndex       string
+	// SessionAffinityID stores the downstream session key used by local usage accounting.
+	SessionAffinityID string
+	AuthID            string
+	AuthIndex         string
 	// AccessTokenSHA256 identifies the OAuth token version without exposing the token.
 	AccessTokenSHA256 string
 	AuthType          string
@@ -74,9 +76,9 @@ type Detail struct {
 	InputTokens         int64
 	OutputTokens        int64
 	ReasoningTokens     int64
-	CachedTokens        int64
 	CacheReadTokens     int64
 	CacheCreationTokens int64
+	CachedTokens        int64
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
@@ -85,6 +87,7 @@ type Detail struct {
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type sessionAffinityIDContextKey struct{}
 type generateContextKey struct{}
 type streamContextKey struct{}
 
@@ -177,6 +180,34 @@ func ServiceTierFromContext(ctx context.Context) string {
 		return tier
 	default:
 		return DefaultServiceTier
+	}
+}
+
+// WithSessionAffinityID stores the sticky routing session ID for usage sinks.
+func WithSessionAffinityID(ctx context.Context, sessionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionAffinityIDContextKey{}, sessionID)
+}
+
+// SessionAffinityIDFromContext returns the sticky routing session ID stored in ctx.
+func SessionAffinityIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	raw := ctx.Value(sessionAffinityIDContextKey{})
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
 	}
 }
 

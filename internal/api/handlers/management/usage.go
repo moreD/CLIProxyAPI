@@ -42,6 +42,16 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 	c.JSON(http.StatusOK, records)
 }
 
+// GetClientUsage returns non-destructive rolling usage statistics grouped by client API key.
+func (h *Handler) GetClientUsage(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+
+	c.JSON(http.StatusOK, redisqueue.UsageStatsSnapshotNow())
+}
+
 func parseUsageQueueCount(value string) (int, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {

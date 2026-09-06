@@ -1,14 +1,18 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	log "github.com/sirupsen/logrus"
@@ -60,7 +64,7 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) exampleAPIKeySafeModeRequired(cfg *config.Config) bool {
-	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(cfg.APIKeys)
+	return s != nil && s.exampleAPIKeySafeModeEnabled && cfg != nil && safemode.HasExampleAPIKeys(config.APIKeyValues(cfg.APIKeys))
 }
 
 func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
@@ -96,7 +100,7 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 	cfg := s.cfg
 	var keys []string
 	if cfg != nil {
-		keys = safemode.ExampleAPIKeys(cfg.APIKeys)
+		keys = safemode.ExampleAPIKeys(config.APIKeyValues(cfg.APIKeys))
 	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
@@ -171,6 +175,10 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+				if decision := redisqueue.CheckClientCostLimit(result.Principal, time.Now()); decision.Exceeded {
+					abortWithClientUsageLimitExceeded(c, decision)
+					return
+				}
 			}
 			c.Next()
 			return
@@ -220,6 +228,10 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		if principal == "" {
 			principal = authorization.Principal
 		}
+		if decision := redisqueue.CheckClientCostLimit(principal, time.Now()); decision.Exceeded {
+			abortWithClientUsageLimitExceeded(c, decision)
+			return
+		}
 		provider := authorization.IssuerProvider
 		if provider == "" {
 			provider = "realtime-client-secret"
@@ -230,4 +242,97 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
 		c.Next()
 	}
+}
+
+func abortWithClientUsageLimitExceeded(c *gin.Context, decision redisqueue.ClientUsageLimitDecision) {
+	if decision.Unavailable {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"type": "accounting_unavailable", "message": "Client billing history could not be recovered. Contact the server administrator."}})
+		return
+	}
+	resetsInSeconds := clientUsageLimitResetsInSeconds(decision.ResetsAt, time.Now())
+	message := fmt.Sprintf(
+		"Client API key USD limit exceeded for %s window: used $%s of $%s. Resets at %s.",
+		decision.Window,
+		decision.Used,
+		decision.Limit,
+		decision.ResetsAt.UTC().Format(time.RFC3339),
+	)
+
+	path := ""
+	if c != nil && c.Request != nil && c.Request.URL != nil {
+		path = c.Request.URL.Path
+	}
+	if c != nil && resetsInSeconds > 0 {
+		c.Header("Retry-After", strconv.FormatInt(resetsInSeconds, 10))
+	}
+
+	switch {
+	case strings.Contains(path, "/v1/messages"):
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "rate_limit_error",
+				"message": message,
+			},
+		})
+	case strings.Contains(path, ":generateContent") || strings.Contains(path, ":streamGenerateContent") || strings.Contains(path, "/v1beta/"):
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"code":    http.StatusTooManyRequests,
+				"message": message,
+				"status":  "RESOURCE_EXHAUSTED",
+			},
+		})
+	case isCodexClientUsageLimitRequest(c, path):
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"message":           message,
+				"type":              "usage_limit_reached",
+				"code":              "usage_limit_exceeded",
+				"resets_at":         decision.ResetsAt.UTC().Unix(),
+				"resets_in_seconds": resetsInSeconds,
+			},
+		})
+	default:
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+			"error": gin.H{
+				"message": message,
+				"type":    "insufficient_quota",
+				"param":   nil,
+				"code":    "insufficient_quota",
+			},
+		})
+	}
+}
+
+func clientUsageLimitResetsInSeconds(resetsAt time.Time, now time.Time) int64 {
+	if resetsAt.IsZero() {
+		return 0
+	}
+	remaining := resetsAt.Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return int64((remaining + time.Second - 1) / time.Second)
+}
+
+func isCodexClientUsageLimitRequest(c *gin.Context, path string) bool {
+	if strings.Contains(path, "/backend-api/codex/") || path == "/backend-api/codex" {
+		return true
+	}
+	if c == nil || c.Request == nil {
+		return false
+	}
+	headers := c.Request.Header
+	for _, name := range []string{"X-Codex-Beta-Features", "X-Codex-Turn-Metadata", "X-Codex-Turn-State"} {
+		if strings.TrimSpace(headers.Get(name)) != "" {
+			return true
+		}
+	}
+	for _, value := range []string{headers.Get("Originator"), headers.Get("User-Agent")} {
+		if strings.Contains(strings.ToLower(value), "codex") {
+			return true
+		}
+	}
+	return false
 }

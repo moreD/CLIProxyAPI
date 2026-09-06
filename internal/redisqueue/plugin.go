@@ -22,7 +22,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if p == nil {
 		return
 	}
-	if !Enabled() || !UsageStatisticsEnabled() {
+	publishQueue := Enabled() && UsageStatisticsEnabled()
+	if !publishQueue && !usageStatsTrackingEnabled() {
 		return
 	}
 
@@ -85,6 +86,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	tokens := tokenStats{
 		InputTokens:            usageDetail.InputTokens,
 		OutputTokens:           usageDetail.OutputTokens,
+		ReadTokens:             usageDetail.InputTokens,
+		WriteTokens:            usageDetail.OutputTokens,
 		ReasoningTokens:        usageDetail.ReasoningTokens,
 		CachedTokens:           usageDetail.CachedTokens,
 		CacheReadTokens:        usageDetail.CacheReadTokens,
@@ -92,7 +95,6 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheCreationTokens:    usageDetail.CacheCreationTokens,
 		TotalTokens:            usageDetail.TotalTokens,
 	}
-
 	failed := record.Failed
 	if !failed {
 		failed = !resolveSuccess(ctx)
@@ -123,7 +125,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ResponseHeaders:  record.ResponseHeaders,
 	}
 
-	payload, err := json.Marshal(queuedUsageDetail{
+	queued := queuedUsageDetail{
 		requestDetail:       detail,
 		AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
 		TokenBreakdown:      usageDetail.TokenBreakdown,
@@ -134,6 +136,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Endpoint:            resolveEndpoint(ctx),
 		AuthType:            authType,
 		APIKey:              apiKey,
+		SessionAffinityID:   strings.TrimSpace(record.SessionAffinityID),
 		RequestID:           requestID,
 		SessionID:           sessionID,
 		ParentSessionID:     parentSessionID,
@@ -144,7 +147,12 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
 		ResponseModel:       responseModel,
-	})
+	}
+	RecordUsageStat(queued)
+	if !publishQueue {
+		return
+	}
+	payload, err := json.Marshal(queued)
 	if err != nil {
 		return
 	}
@@ -162,6 +170,7 @@ type queuedUsageDetail struct {
 	Endpoint            string                   `json:"endpoint"`
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
+	SessionAffinityID   string                   `json:"session_affinity_id,omitempty"`
 	RequestID           string                   `json:"request_id"`
 	SessionID           string                   `json:"session_id,omitempty"`
 	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
@@ -196,6 +205,8 @@ type requestDetail struct {
 type tokenStats struct {
 	InputTokens            int64 `json:"input_tokens"`
 	OutputTokens           int64 `json:"output_tokens"`
+	ReadTokens             int64 `json:"read_tokens"`
+	WriteTokens            int64 `json:"write_tokens"`
 	ReasoningTokens        int64 `json:"reasoning_tokens"`
 	CachedTokens           int64 `json:"cached_tokens"`
 	CacheReadTokens        int64 `json:"cache_read_tokens"`

@@ -43,11 +43,18 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
-# API keys for authentication
+# API keys for client authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - name: "Alice"
+    api-key: "your-api-key-1"
+    # Dollar budgets; omitted or zero means unlimited for that window.
+    cost-limits:
+      12h: 0.40
+      7d: 4.00
+  - name: "Bob"
+    api-key: "your-api-key-2"
+  - name: "CI"
+    api-key: "your-api-key-3"
 
 # Enable debug logging
 debug: false

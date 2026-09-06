@@ -67,8 +67,8 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	if clone.Home.Host != "home.local" {
 		t.Fatalf("clone.Home.Host = %q, want home.local", clone.Home.Host)
 	}
-	if clone.APIKeys[0] != "client-key" {
-		t.Fatalf("clone.APIKeys[0] = %q, want client-key", clone.APIKeys[0])
+	if clone.APIKeys[0].APIKey != "client-key" {
+		t.Fatalf("clone.APIKeys[0].APIKey = %q, want client-key", clone.APIKeys[0].APIKey)
 	}
 	if clone.OAuthExcludedModels["codex"][0] != "hidden-model" {
 		t.Fatalf("clone.OAuthExcludedModels[codex][0] = %q, want hidden-model", clone.OAuthExcludedModels["codex"][0])
@@ -86,7 +86,7 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 		t.Fatalf("clone payload object key = %#v, want value", got)
 	}
 
-	clone.APIKeys[0] = "clone-client-key"
+	clone.APIKeys[0].APIKey = "clone-client-key"
 	clone.OAuthExcludedModels["codex"][0] = "clone-hidden-model"
 	clone.OAuthModelAlias["codex"][0].Alias = "clone-client-model"
 	clone.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "clone-low"
@@ -95,8 +95,8 @@ func TestCloneForRuntimeDeepCopiesConfig(t *testing.T) {
 	setPluginRawScalar(t, &plugin.Raw, "mode", "third")
 	clone.Plugins.Configs["sample"] = plugin
 
-	if cfg.APIKeys[0] != "mutated-client-key" {
-		t.Fatalf("cfg.APIKeys[0] = %q, want mutated-client-key", cfg.APIKeys[0])
+	if cfg.APIKeys[0].APIKey != "mutated-client-key" {
+		t.Fatalf("cfg.APIKeys[0].APIKey = %q, want mutated-client-key", cfg.APIKeys[0].APIKey)
 	}
 	if cfg.OAuthExcludedModels["codex"][0] != "mutated-hidden-model" {
 		t.Fatalf("cfg.OAuthExcludedModels[codex][0] = %q, want mutated-hidden-model", cfg.OAuthExcludedModels["codex"][0])
@@ -130,7 +130,7 @@ func sampleCloneRuntimeConfig() *Config {
 
 	return &Config{
 		SDKConfig: SDKConfig{
-			APIKeys: []string{"client-key"},
+			APIKeys: []APIKeyEntry{{APIKey: "client-key"}},
 			Streaming: StreamingConfig{
 				KeepAliveSeconds: 3,
 				BootstrapRetries: 2,
@@ -230,7 +230,7 @@ func sampleCloneRuntimeConfig() *Config {
 
 func mutateOriginalConfig(cfg *Config) {
 	cfg.Home.Host = "mutated-home.local"
-	cfg.APIKeys[0] = "mutated-client-key"
+	cfg.APIKeys[0].APIKey = "mutated-client-key"
 	cfg.OAuthExcludedModels["codex"][0] = "mutated-hidden-model"
 	cfg.OAuthModelAlias["codex"][0].Alias = "mutated-client-model"
 	cfg.OpenAICompatibility[0].Models[0].Thinking.Levels[0] = "mutated-low"

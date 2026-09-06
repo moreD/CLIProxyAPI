@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -380,6 +382,174 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 	})
 }
 
+func TestUsageQueuePluginRecordsNonDestructiveClientUsageStats(t *testing.T) {
+	withEnabledQueue(t, func() {
+		now := time.Now().UTC()
+		plugin := &usageQueuePlugin{}
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:          "codex",
+			Model:             "gpt-5.5",
+			Alias:             "codex",
+			APIKey:            "client-key",
+			SessionAffinityID: "codex:session-1",
+			RequestedAt:       now.Add(-2 * time.Minute),
+			Latency:           100 * time.Millisecond,
+			Detail: coreusage.Detail{
+				InputTokens:     100,
+				OutputTokens:    20,
+				CacheReadTokens: 70,
+				TotalTokens:     120,
+			},
+		})
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Provider:          "codex",
+			Model:             "gpt-5.5",
+			Alias:             "codex",
+			APIKey:            "client-key",
+			SessionAffinityID: "codex:session-1",
+			Failed:            true,
+			RequestedAt:       now.Add(-time.Minute),
+			Latency:           200 * time.Millisecond,
+			Detail: coreusage.Detail{
+				InputTokens:  10,
+				OutputTokens: 5,
+				TotalTokens:  15,
+			},
+		})
+
+		first := UsageStatsSnapshotNow()
+		second := UsageStatsSnapshotNow()
+		if len(first.APIKeys) != 1 || len(second.APIKeys) != 1 {
+			t.Fatalf("snapshot api keys = %d/%d, want 1/1", len(first.APIKeys), len(second.APIKeys))
+		}
+		got := first.APIKeys[0]
+		if got.APIKey != "client-key" {
+			t.Fatalf("api key = %q, want client-key", got.APIKey)
+		}
+		window := got.SevenDay
+		if window.RequestCount != 2 || window.SuccessCount != 1 || window.FailureCount != 1 {
+			t.Fatalf("counts = request:%d success:%d failure:%d, want 2/1/1", window.RequestCount, window.SuccessCount, window.FailureCount)
+		}
+		if window.Tokens.TotalTokens != 135 || window.Tokens.ReadTokens != 110 || window.Tokens.WriteTokens != 25 {
+			t.Fatalf("tokens = %+v, want total 135 read 110 write 25", window.Tokens)
+		}
+		if window.CostUSD != billing.USD(985_000) {
+			t.Fatalf("cost = %s, want 0.000985000", window.CostUSD)
+		}
+		if window.Tokens.CacheReadTokens != 70 {
+			t.Fatalf("cache read tokens = %+v, want 70", window.Tokens)
+		}
+		rawTokens, errMarshal := json.Marshal(window.Tokens)
+		if errMarshal != nil {
+			t.Fatalf("marshal tokens: %v", errMarshal)
+		}
+		var tokenPayload map[string]any
+		if errUnmarshal := json.Unmarshal(rawTokens, &tokenPayload); errUnmarshal != nil {
+			t.Fatalf("unmarshal tokens: %v", errUnmarshal)
+		}
+		if _, ok := tokenPayload["cached_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include cached_tokens: %s", string(rawTokens))
+		}
+		if _, ok := tokenPayload["cache_creation_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include cache_creation_tokens: %s", string(rawTokens))
+		}
+		if _, ok := tokenPayload["input_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include input_tokens: %s", string(rawTokens))
+		}
+		if _, ok := tokenPayload["output_tokens"]; ok {
+			t.Fatalf("client usage stats unexpectedly include output_tokens: %s", string(rawTokens))
+		}
+		if len(window.ProviderStats) != 1 {
+			t.Fatalf("provider stats = %d, want 1", len(window.ProviderStats))
+		}
+		if got := window.ProviderStats[0].SessionAffinityID; got != "codex:session-1" {
+			t.Fatalf("session affinity id = %q, want codex:session-1", got)
+		}
+		if second.APIKeys[0].SevenDay.RequestCount != window.RequestCount {
+			t.Fatalf("second snapshot request count = %d, want %d", second.APIKeys[0].SevenDay.RequestCount, window.RequestCount)
+		}
+	})
+}
+
+func TestUsageQueuePluginRecordsStatsForTokenLimitsWhenQueueDisabled(t *testing.T) {
+	prevQueueEnabled := Enabled()
+	prevUsageEnabled := UsageStatisticsEnabled()
+	SetEnabled(false)
+	SetUsageStatisticsEnabled(false)
+	SetClientCostLimits([]config.APIKeyEntry{
+		{APIKey: "limited-key", CostLimits: config.APIKeyCostLimits{TwelveHour: billing.USD(1_000_000)}},
+	})
+	ClearUsageStats()
+	t.Cleanup(func() {
+		SetClientCostLimits(nil)
+		SetUsageStatisticsEnabled(prevUsageEnabled)
+		SetEnabled(prevQueueEnabled)
+		ClearUsageStats()
+	})
+
+	plugin := &usageQueuePlugin{}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "limited-key",
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens: 100,
+			TotalTokens: 100,
+		},
+	})
+
+	decision := CheckClientCostLimit("limited-key", time.Now())
+	if !decision.Exceeded || decision.Window != "12h" || decision.Used != billing.USD(1_000_000) {
+		t.Fatalf("decision = %+v, want exceeded 12h at $0.001000000", decision)
+	}
+	if queued := PopOldest(10); len(queued) != 0 {
+		t.Fatalf("queue records = %d, want 0 when queue disabled", len(queued))
+	}
+}
+
+func TestUsageQueuePluginBillsCanonicalOutputReasoningOnce(t *testing.T) {
+	withEnabledQueue(t, func() {
+		now := time.Now().UTC()
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+			Provider: "codex", Model: "gpt-5.6-sol", APIKey: "reasoning-key", RequestedAt: now,
+			Detail: coreusage.Detail{
+				InputTokens: 100, OutputTokens: 25, ReasoningTokens: 5, TotalTokens: 125,
+				TokenBreakdown: coreusage.NewSubsetTokenBreakdown(100, 0, 0, 25, 5, 125),
+			},
+		})
+
+		snapshot := UsageStatsSnapshotNow()
+		if len(snapshot.APIKeys) != 1 {
+			t.Fatalf("api keys = %d, want 1", len(snapshot.APIKeys))
+		}
+		window := snapshot.APIKeys[0].SevenDay
+		if window.Tokens.WriteTokens != 25 || window.Tokens.ReasoningTokens != 5 {
+			t.Fatalf("tokens = %+v, want output 25 including reasoning 5", window.Tokens)
+		}
+		if window.CostUSD != billing.USD(900_000) {
+			t.Fatalf("cost = %s, want 0.000900000", window.CostUSD)
+		}
+	})
+}
+
+func TestUsageQueuePluginBillsEffectiveResponseTier(t *testing.T) {
+	withEnabledQueue(t, func() {
+		now := time.Now().UTC()
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+			Provider: "codex", Model: "gpt-5.6-sol", APIKey: "tier-key", RequestedAt: now,
+			ServiceTier: "standard", ResponseServiceTier: "priority",
+			Detail: coreusage.Detail{
+				InputTokens: 100, TotalTokens: 100,
+				TokenBreakdown: coreusage.NewSubsetTokenBreakdown(100, 0, 0, 0, 0, 100),
+			},
+		})
+
+		window := UsageStatsSnapshotNow().APIKeys[0].SevenDay
+		if window.CostUSD != billing.USD(800_000) {
+			t.Fatalf("priority response cost = %s, want 0.000800000", window.CostUSD)
+		}
+	})
+}
+
 func withEnabledQueue(t *testing.T, fn func()) {
 	t.Helper()
 
@@ -389,6 +559,7 @@ func withEnabledQueue(t *testing.T, fn func()) {
 	SetEnabled(false)
 	SetEnabled(true)
 	SetUsageStatisticsEnabled(true)
+	ClearUsageStats()
 
 	defer func() {
 		SetEnabled(false)

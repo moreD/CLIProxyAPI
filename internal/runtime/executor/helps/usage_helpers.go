@@ -38,6 +38,7 @@ type UsageReporter struct {
 	apiKey              string
 	sessionID           string
 	parentSessionID     string
+	sessionAffinityID   string
 	source              string
 	reasoning           string
 	serviceTier         string
@@ -87,6 +88,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	}
 	sessionID := ""
 	parentSessionID := ""
+	sessionAffinityID := usage.SessionAffinityIDFromContext(ctx)
 	clientMeta := internallogging.GetClientRequestMetadata(ctx)
 	if clientMeta.SessionID != "" {
 		sessionID = clientMeta.SessionID
@@ -107,20 +109,21 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		}
 	}
 	reporter := &UsageReporter{
-		provider:        provider,
-		baseURL:         baseURL,
-		model:           model,
-		alias:           strings.TrimSpace(alias),
-		requestedAt:     time.Now(),
-		apiKey:          apiKey,
-		sessionID:       sessionID,
-		parentSessionID: parentSessionID,
-		source:          resolveUsageSource(auth, apiKey),
-		authType:        resolveUsageAuthType(auth),
-		reasoning:       usage.ReasoningEffortFromContext(ctx),
-		serviceTier:     usage.ServiceTierFromContext(ctx),
-		generate:        usage.GenerateFromContext(ctx),
-		stream:          usage.StreamFromContext(ctx),
+		provider:          provider,
+		baseURL:           baseURL,
+		model:             model,
+		alias:             strings.TrimSpace(alias),
+		requestedAt:       time.Now(),
+		apiKey:            apiKey,
+		sessionID:         sessionID,
+		parentSessionID:   parentSessionID,
+		source:            resolveUsageSource(auth, apiKey),
+		authType:          resolveUsageAuthType(auth),
+		reasoning:         usage.ReasoningEffortFromContext(ctx),
+		serviceTier:       usage.ServiceTierFromContext(ctx),
+		generate:          usage.GenerateFromContext(ctx),
+		stream:            usage.StreamFromContext(ctx),
+		sessionAffinityID: sessionAffinityID,
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -553,9 +556,9 @@ func hasNonZeroTokenUsage(detail usage.Detail) bool {
 	return detail.InputTokens != 0 ||
 		detail.OutputTokens != 0 ||
 		detail.ReasoningTokens != 0 ||
-		detail.CachedTokens != 0 ||
 		detail.CacheReadTokens != 0 ||
 		detail.CacheCreationTokens != 0 ||
+		detail.CachedTokens != 0 ||
 		detail.TotalTokens != 0 ||
 		detail.TokenBreakdown.TotalTokens != 0
 }
@@ -616,6 +619,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		APIKey:              r.apiKey,
 		SessionID:           r.sessionID,
 		ParentSessionID:     r.parentSessionID,
+		SessionAffinityID:   r.sessionAffinityID,
 		AuthID:              r.authID,
 		AuthIndex:           r.authIndex,
 		AccessTokenSHA256:   r.accessTokenFingerprint(),
