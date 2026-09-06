@@ -16,6 +16,19 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
+## Install / Restart
+- When asked to install locally, first verify the build with `go build -o test-output ./cmd/server && rm test-output`.
+- Build the install artifact separately, for example `go build -o /tmp/cli-proxy-api-$(git rev-parse --short HEAD) ./cmd/server`.
+- Install location is `~/cliproxyapi/cli-proxy-api`; keep `~/cliproxyapi/version.txt` in sync with `git describe --tags --dirty --always`.
+- Before replacing an existing install, create a timestamped backup under `~/cliproxyapi/backups/` and copy at least the existing `cli-proxy-api` and `version.txt` into it.
+- After a deployment passes verification, retain only the three newest deployment backup sets under `~/cliproxyapi/backups/`. Keep the immediate previous `.good` copies; standalone source and configuration archives are not deployment backup sets.
+- Client usage statistics persist under `~/cliproxyapi/usage-stats/`; keep this directory with the user-space deployment and do not move it back under `/tmp`.
+- The deployed management panel is `~/cliproxyapi/static/management.html`. For CPA Manager Plus changes, build from `~/repos/CPA-Manager-Plus` with `npm run type-check` and `npm run build`, then install `apps/web/dist/index.html` to that path.
+- Before replacing `management.html`, create a timestamped backup under `~/cliproxyapi/backups/`, copy the current `management.html` and existing `management.html.good` into it, then copy the current `management.html` to `~/cliproxyapi/static/management.html.good`. Treat `management.html.good` as the immediate previous deployed file.
+- The production service runs as the `ubuntu` user via systemd user units at `~/.config/systemd/user/cliproxyapi.service`; root/system service units should not be used.
+- After replacing the binary, restart with `systemctl --user restart cliproxyapi` and verify with `systemctl --user status cliproxyapi --no-pager` or `systemctl --user show cliproxyapi -p ActiveState -p SubState -p MainPID --no-pager`.
+- If the user service needs to survive logout or reboot, verify linger with `loginctl show-user ubuntu -p Linger`; enable it with `sudo -n loginctl enable-linger ubuntu` if needed.
+
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)
 - `.env` is auto-loaded from the working directory
