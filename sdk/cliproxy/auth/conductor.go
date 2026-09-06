@@ -191,6 +191,7 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+	refreshCtx    context.Context
 	refreshLoop   *authAutoRefreshLoop
 
 	requestPrepareLocks sync.Map

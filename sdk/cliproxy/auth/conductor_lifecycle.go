@@ -129,6 +129,7 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
+	m.refreshQuotaAfterAuthChange(auth.ID)
 	return auth.Clone(), nil
 }
 
@@ -171,6 +172,7 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		m.mu.Unlock()
 		return nil, nil
 	}
+	quotaCredentialChanged := quotaRefreshCredentialChanged(existing, auth)
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
 	}
@@ -214,6 +216,15 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 		auth.Generation = existing.Generation + 1
 	} else {
 		auth.Generation++
+	}
+	if auth.RuntimeQuota == nil && existing.RuntimeQuota != nil {
+		auth.RuntimeQuota = existing.RuntimeQuota.Clone()
+		auth.LastQuotaSeenAt = existing.LastQuotaSeenAt
+		auth.LastProbedAt = existing.LastProbedAt
+	}
+	if auth.QuotaRefreshError == "" && existing.QuotaRefreshError != "" {
+		auth.QuotaRefreshError = existing.QuotaRefreshError
+		auth.QuotaRefreshErrorStatus = existing.QuotaRefreshErrorStatus
 	}
 	cooldownStateChanged := false
 	if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
@@ -277,7 +288,28 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if cooldownStateChanged {
 		m.persistCooldownStates(context.Background())
 	}
+	if quotaCredentialChanged {
+		m.refreshQuotaAfterAuthChange(auth.ID)
+	}
 	return auth.Clone(), nil
+}
+
+func quotaRefreshCredentialChanged(existing, updated *Auth) bool {
+	if existing == nil || updated == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(existing.Provider), strings.TrimSpace(updated.Provider)) {
+		return true
+	}
+	if existing.Disabled != updated.Disabled || (existing.Status == StatusDisabled) != (updated.Status == StatusDisabled) {
+		return true
+	}
+	for _, key := range []string{"access_token", "accessToken", "refresh_token", "refreshToken", "id_token", "idToken", "account_id", "accountId"} {
+		if authMetadataString(existing, key) != authMetadataString(updated, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // Remove deletes an auth from runtime state without persisting.

@@ -534,6 +534,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			lastErr = errPrepare
 			continue
 		}
+		switchAuth, errQuota := m.refreshQuotaBeforeRequest(execCtx, auth, executor)
+		if errQuota != nil {
+			return cliproxyexecutor.Response{}, errQuota
+		}
+		if switchAuth {
+			lastErr = quotaLimitSwitchError()
+			continue
+		}
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
@@ -745,6 +753,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true}
 			m.MarkResult(execCtx, result)
 			lastErr = errPrepare
+			continue
+		}
+		switchAuth, errQuota := m.refreshQuotaBeforeRequest(execCtx, auth, executor)
+		if errQuota != nil {
+			return cliproxyexecutor.Response{}, errQuota
+		}
+		if switchAuth {
+			lastErr = quotaLimitSwitchError()
 			continue
 		}
 		var authErr error
@@ -1105,6 +1121,16 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 			}
 			continue
+		}
+		if selection == nil {
+			switchAuth, errQuota := m.refreshQuotaBeforeRequest(execCtx, auth, executor)
+			if errQuota != nil {
+				return nil, errQuota
+			}
+			if switchAuth {
+				lastErr = quotaLimitSwitchError()
+				continue
+			}
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		if selection != nil && !restoreExecutionModel {

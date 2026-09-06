@@ -49,6 +49,7 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	m.mu.Lock()
 	cancelPrev := m.refreshCancel
 	m.refreshCancel = nil
+	m.refreshCtx = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
 	if cancelPrev != nil {
@@ -61,11 +62,13 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 
 	m.mu.Lock()
 	m.refreshCancel = cancelCtx
+	m.refreshCtx = ctx
 	m.refreshLoop = loop
 	m.mu.Unlock()
 
 	loop.rebuild(time.Now())
 	go loop.run(ctx)
+	go m.runQuotaRefreshLoop(ctx, quotaRefreshInterval)
 }
 
 // StopAutoRefresh cancels the background refresh loop, if running.
@@ -74,6 +77,7 @@ func (m *Manager) StopAutoRefresh() {
 	m.mu.Lock()
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
+	m.refreshCtx = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
 	if cancel != nil {

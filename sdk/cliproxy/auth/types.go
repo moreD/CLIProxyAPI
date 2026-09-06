@@ -88,6 +88,10 @@ type Auth struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// LastRefreshedAt records the last successful refresh time in UTC.
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
+	// LastQuotaSeenAt records the last quota usage refresh time in UTC.
+	LastQuotaSeenAt time.Time `json:"last_quota_seen_at"`
+	// LastProbedAt records the last quota countdown probe attempt time in UTC.
+	LastProbedAt time.Time `json:"last_probed_at"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
@@ -97,6 +101,12 @@ type Auth struct {
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+	// RuntimeQuota carries non-persisted quota state used by quota-aware routing.
+	RuntimeQuota *QuotaInfo `json:"-"`
+	// QuotaRefreshError carries the latest non-persisted quota refresh failure message.
+	QuotaRefreshError string `json:"-"`
+	// QuotaRefreshErrorStatus carries the HTTP status associated with QuotaRefreshError, when known.
+	QuotaRefreshErrorStatus int `json:"-"`
 
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
@@ -109,6 +119,7 @@ const (
 	AttributeAuthIndexSeed   = "auth_index_seed"
 	AttributePluginVirtual   = "plugin_virtual"
 	AttributeVirtualSource   = "virtual_source"
+	MetadataWorkspaceName    = "workspace_name"
 	pluginVirtualAttrEnabled = "true"
 )
 
@@ -200,6 +211,83 @@ func (q QuotaState) Clone() QuotaState {
 		}
 	}
 	return copyQuota
+}
+
+// QuotaInfo contains in-memory Codex rolling-window quota state.
+type QuotaInfo struct {
+	FiveHour              QuotaWindow        `json:"five_hour"`
+	Weekly                QuotaWindow        `json:"weekly"`
+	RateLimitResetCredits *QuotaResetCredits `json:"rate_limit_reset_credits,omitempty"`
+}
+
+// QuotaResetCredits describes the rate-limit resets available for a Codex credential.
+type QuotaResetCredits struct {
+	AvailableCount           int64 `json:"available_count"`
+	ApplicableAvailableCount int64 `json:"applicable_available_count"`
+}
+
+// QuotaWindow describes one rolling quota window.
+type QuotaWindow struct {
+	Used               int64     `json:"used"`
+	Limit              int64     `json:"limit"`
+	UsedPercent        float64   `json:"used_percent"`
+	UsedPercentKnown   bool      `json:"used_percent_known,omitempty"`
+	LimitWindowSeconds int64     `json:"limit_window_seconds,omitempty"`
+	NextFreshAt        time.Time `json:"next_fresh_at"`
+	RefreshedAt        time.Time `json:"refreshed_at"`
+}
+
+// Clone returns a deep copy of quota info.
+func (q *QuotaInfo) Clone() *QuotaInfo {
+	if q == nil {
+		return nil
+	}
+	copyQuota := *q
+	if q.RateLimitResetCredits != nil {
+		copyCredits := *q.RateLimitResetCredits
+		copyQuota.RateLimitResetCredits = &copyCredits
+	}
+	return &copyQuota
+}
+
+func (w QuotaWindow) known() bool {
+	return w.Used != 0 || w.Limit != 0 || w.UsedPercentKnown || w.UsedPercent != 0 || !w.NextFreshAt.IsZero() || !w.RefreshedAt.IsZero()
+}
+
+func (w QuotaWindow) usedKnown() bool {
+	return w.UsedPercentKnown || w.UsedPercent != 0
+}
+
+// HasWeekly reports whether the weekly window has usable routing data.
+func (q *QuotaInfo) HasWeekly() bool {
+	return q != nil && q.Weekly.known()
+}
+
+// HasAny reports whether any quota window or reset-credit state has data.
+func (q *QuotaInfo) HasAny() bool {
+	return q != nil && (q.FiveHour.known() || q.Weekly.known() || q.RateLimitResetCredits != nil)
+}
+
+// MergeQuotaInfo overlays known windows and reset-credit state from update onto base.
+func MergeQuotaInfo(base, update *QuotaInfo) *QuotaInfo {
+	if base == nil {
+		return update.Clone()
+	}
+	merged := base.Clone()
+	if update == nil {
+		return merged
+	}
+	if update.FiveHour.known() {
+		merged.FiveHour = update.FiveHour
+	}
+	if update.Weekly.known() {
+		merged.Weekly = update.Weekly
+	}
+	if update.RateLimitResetCredits != nil {
+		copyCredits := *update.RateLimitResetCredits
+		merged.RateLimitResetCredits = &copyCredits
+	}
+	return merged
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -310,6 +398,7 @@ func (a *Auth) Clone() *Auth {
 		}
 	}
 	copyAuth.Runtime = a.Runtime
+	copyAuth.RuntimeQuota = a.RuntimeQuota.Clone()
 	return &copyAuth
 }
 

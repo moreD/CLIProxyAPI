@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -44,6 +45,48 @@ func TestManagerMarkResultRecordsRecentRequests(t *testing.T) {
 	}
 	if successTotal != 1 || failedTotal != 1 {
 		t.Fatalf("totals = success=%d failed=%d, want 1/1", successTotal, failedTotal)
+	}
+}
+
+func TestManagerMarkResultUnauthorizedSetsSharedAuthState(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type": "codex",
+		},
+	}
+
+	if _, err := mgr.Register(WithSkipPersist(context.Background()), auth); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+
+	mgr.MarkResult(context.Background(), Result{
+		AuthID:   "auth-1",
+		Provider: "codex",
+		Model:    "gpt-5.5",
+		Success:  false,
+		Error: &Error{
+			Code:       "unauthorized",
+			Message:    "unauthorized",
+			HTTPStatus: http.StatusUnauthorized,
+		},
+	})
+
+	gotAuth, ok := mgr.GetByID("auth-1")
+	if !ok || gotAuth == nil {
+		t.Fatalf("GetByID returned ok=%v auth=%v", ok, gotAuth)
+	}
+	if !hasUnauthorizedAuthFailure(gotAuth) {
+		t.Fatalf("LastError = %#v, want unauthorized", gotAuth.LastError)
+	}
+	if !gotAuth.Unavailable || gotAuth.Status != StatusError || gotAuth.StatusMessage != "unauthorized" {
+		t.Fatalf("auth state = unavailable:%v status:%s message:%q, want shared unauthorized state", gotAuth.Unavailable, gotAuth.Status, gotAuth.StatusMessage)
+	}
+	blocked, _, _ := isAuthBlockedForModel(gotAuth, "different-model", time.Now())
+	if !blocked {
+		t.Fatal("expected auth-level unauthorized state to block other models")
 	}
 }
 

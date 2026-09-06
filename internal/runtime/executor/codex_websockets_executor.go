@@ -97,6 +97,27 @@ func (e *CodexAutoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth
 	return e.httpExec.Refresh(ctx, auth)
 }
 
+func (e *CodexAutoExecutor) RefreshQuota(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.QuotaInfo, error) {
+	if e == nil || e.httpExec == nil {
+		return nil, fmt.Errorf("codex auto executor: http executor is nil")
+	}
+	return e.httpExec.RefreshQuota(ctx, auth)
+}
+
+func (e *CodexAutoExecutor) RefreshWorkspaceMetadata(ctx context.Context, auth *cliproxyauth.Auth) (map[string]string, error) {
+	if e == nil || e.httpExec == nil {
+		return nil, fmt.Errorf("codex auto executor: http executor is nil")
+	}
+	return e.httpExec.RefreshWorkspaceMetadata(ctx, auth)
+}
+
+func (e *CodexAutoExecutor) ProbeQuotaCountdown(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.QuotaInfo, error) {
+	if e == nil || e.httpExec == nil {
+		return nil, fmt.Errorf("codex auto executor: http executor is nil")
+	}
+	return e.httpExec.ProbeQuotaCountdown(ctx, auth)
+}
+
 func (e *CodexAutoExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if e == nil || e.httpExec == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex auto executor: http executor is nil")

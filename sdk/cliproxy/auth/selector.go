@@ -71,6 +71,14 @@ func weightedSelectorStateModel(ctx context.Context, availabilityModel string) s
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// StickyRoundRobinSelector keeps using the selected credential until it becomes
+// unavailable, then advances to the next credential in round-robin order.
+type StickyRoundRobinSelector struct {
+	mu      sync.Mutex
+	sticky  map[string]string
+	maxKeys int
+}
+
 type blockReason int
 
 const (
@@ -820,6 +828,53 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	return available[0], nil
 }
 
+// Pick selects the current sticky credential while it remains available. When it
+// is no longer available, selection advances to the next credential by auth ID.
+func (s *StickyRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	key := provider + ":" + canonicalModelKey(model)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sticky == nil {
+		s.sticky = make(map[string]string)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	s.ensureKeyCapacity(key, limit)
+
+	currentID := s.sticky[key]
+	if currentID != "" {
+		for _, candidate := range available {
+			if candidate != nil && candidate.ID == currentID {
+				return candidate, nil
+			}
+		}
+	}
+
+	selectedIndex := bestStickyAuthIndex(available)
+	if selectedIndex < 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	selected := available[selectedIndex]
+	s.sticky[key] = selected.ID
+	return selected, nil
+}
+
+// ensureKeyCapacity bounds the sticky map. Must be called with s.mu held.
+func (s *StickyRoundRobinSelector) ensureKeyCapacity(key string, limit int) {
+	if _, ok := s.sticky[key]; !ok && len(s.sticky) >= limit {
+		s.sticky = make(map[string]string)
+	}
+}
+
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
@@ -835,6 +890,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
+	}
+	if auth.Unavailable && hasUnauthorizedAuthFailure(auth) {
+		return true, blockReasonOther, auth.NextRetryAfter
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
@@ -886,7 +944,6 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 	if !unavailable && !quotaExceeded {
 		return false, blockReasonNone, time.Time{}
 	}
-
 	hasRecoveryTime := !nextRetryAfter.IsZero() || !nextRecoverAt.IsZero()
 	var next time.Time
 	for _, candidate := range []time.Time{nextRetryAfter, nextRecoverAt} {

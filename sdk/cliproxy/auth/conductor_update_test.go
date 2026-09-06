@@ -97,6 +97,60 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 	}
 }
 
+func TestManager_Update_PreservesRuntimeQuota(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+
+	seenAt := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	probedAt := seenAt.Add(5 * time.Minute)
+	if _, errRegister := m.Register(context.Background(), &Auth{
+		ID:                      "auth-quota",
+		Provider:                "codex",
+		Status:                  StatusActive,
+		Metadata:                map[string]any{"email": "a@example.com"},
+		LastQuotaSeenAt:         seenAt,
+		LastProbedAt:            probedAt,
+		QuotaRefreshError:       "codex quota refresh: status 401: invalidated",
+		QuotaRefreshErrorStatus: 401,
+		RuntimeQuota: &QuotaInfo{
+			FiveHour: QuotaWindow{
+				UsedPercent:      80,
+				UsedPercentKnown: true,
+			},
+		},
+	}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	if _, errUpdate := m.Update(context.Background(), &Auth{
+		ID:       "auth-quota",
+		Provider: "codex",
+		Status:   StatusActive,
+		Metadata: map[string]any{"email": "changed@example.com"},
+	}); errUpdate != nil {
+		t.Fatalf("update auth: %v", errUpdate)
+	}
+
+	updated, ok := m.GetByID("auth-quota")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.RuntimeQuota == nil || updated.RuntimeQuota.FiveHour.UsedPercent != 80 {
+		t.Fatalf("RuntimeQuota = %#v, want preserved five-hour quota", updated.RuntimeQuota)
+	}
+	if !updated.LastQuotaSeenAt.Equal(seenAt) {
+		t.Fatalf("LastQuotaSeenAt = %v, want %v", updated.LastQuotaSeenAt, seenAt)
+	}
+	if !updated.LastProbedAt.Equal(probedAt) {
+		t.Fatalf("LastProbedAt = %v, want %v", updated.LastProbedAt, probedAt)
+	}
+	if updated.QuotaRefreshError != "codex quota refresh: status 401: invalidated" {
+		t.Fatalf("QuotaRefreshError = %q, want preserved refresh error", updated.QuotaRefreshError)
+	}
+	if updated.QuotaRefreshErrorStatus != 401 {
+		t.Fatalf("QuotaRefreshErrorStatus = %d, want 401", updated.QuotaRefreshErrorStatus)
+	}
+}
+
 func TestManager_Update_DisabledExistingDoesNotInheritModelStates(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 

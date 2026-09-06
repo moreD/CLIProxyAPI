@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -701,6 +702,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
+	if workspaceName := authWorkspaceName(auth); workspaceName != "" {
+		entry[coreauth.MetadataWorkspaceName] = workspaceName
+	}
 	if projectID := authProjectID(auth); projectID != "" {
 		entry["project_id"] = projectID
 	}
@@ -721,6 +725,18 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 	}
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
+	}
+	if auth.RuntimeQuota != nil && auth.RuntimeQuota.HasAny() {
+		entry["runtime_quota"] = auth.RuntimeQuota.Clone()
+		if !auth.LastQuotaSeenAt.IsZero() {
+			entry["last_quota_seen_at"] = auth.LastQuotaSeenAt
+		}
+	}
+	if quotaRefreshError, quotaRefreshErrorStatus := effectiveQuotaRefreshError(auth); quotaRefreshError != "" {
+		entry["quota_refresh_error"] = quotaRefreshError
+		if quotaRefreshErrorStatus != 0 {
+			entry["quota_refresh_error_status"] = quotaRefreshErrorStatus
+		}
 	}
 	if !nextRetryAfter.IsZero() {
 		entry["next_retry_after"] = nextRetryAfter
@@ -833,6 +849,23 @@ func modelQuotaObservationPayload(provider string, states map[string]*coreauth.M
 		observations[model] = quotaObservationPayloadForProvider(provider, state.Quota)
 	}
 	return observations
+}
+
+func effectiveQuotaRefreshError(auth *coreauth.Auth) (string, int) {
+	if auth == nil {
+		return "", 0
+	}
+	if auth.LastError != nil && (auth.LastError.StatusCode() == http.StatusUnauthorized || strings.EqualFold(strings.TrimSpace(auth.LastError.Code), "unauthorized")) {
+		message := strings.TrimSpace(auth.LastError.Message)
+		if message == "" {
+			message = strings.TrimSpace(auth.StatusMessage)
+		}
+		if message == "" {
+			message = "unauthorized"
+		}
+		return message, http.StatusUnauthorized
+	}
+	return strings.TrimSpace(auth.QuotaRefreshError), auth.QuotaRefreshErrorStatus
 }
 
 func authWeightValue(auth *coreauth.Auth) (int64, bool) {
@@ -962,6 +995,14 @@ func authEmail(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func authWorkspaceName(auth *coreauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	workspaceName, _ := auth.Metadata[coreauth.MetadataWorkspaceName].(string)
+	return strings.TrimSpace(workspaceName)
 }
 
 func authAttribute(auth *coreauth.Auth, key string) string {

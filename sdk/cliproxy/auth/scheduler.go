@@ -22,6 +22,7 @@ const (
 	schedulerStrategyRoundRobin         schedulerStrategy = 1
 	schedulerStrategyFillFirst          schedulerStrategy = 2
 	schedulerStrategyWeightedRoundRobin schedulerStrategy = 3
+	schedulerStrategyStickyRoundRobin   schedulerStrategy = 4
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -50,6 +51,7 @@ type authScheduler struct {
 	authGenerations     map[string]scheduledGenerationMeta
 	mixedCursors        map[string]int
 	mixedWeightedStates map[string]*smoothWeightedState
+	mixedSticky         map[string]string
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -98,6 +100,7 @@ type readyView struct {
 	flat          []*scheduledAuth
 	lastPicked    string
 	weightedState smoothWeightedState
+	stickyAuthID  string
 }
 
 // cooldownQueue is the blocked auth collection ordered by next retry time during rebuilds.
@@ -106,6 +109,7 @@ type cooldownQueue []*scheduledAuth
 type readyViewCursorState struct {
 	lastPicked    string
 	weightedState smoothWeightedState
+	stickyAuthID  string
 }
 
 type readyBucketCursorState struct {
@@ -114,7 +118,10 @@ type readyBucketCursorState struct {
 }
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
-	state := readyViewCursorState{lastPicked: view.lastPicked}
+	state := readyViewCursorState{
+		lastPicked:   view.lastPicked,
+		stickyAuthID: view.stickyAuthID,
+	}
 	if len(view.weightedState.current) > 0 {
 		state.weightedState.current = make(map[string]int64, len(view.weightedState.current))
 		for authID, current := range view.weightedState.current {
@@ -135,6 +142,7 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 		return
 	}
 	view.lastPicked = state.lastPicked
+	view.stickyAuthID = state.stickyAuthID
 	weights := scheduledWeightVector(view.flat)
 	if len(state.weightedState.current) == 0 || weightsConfigChanged(state.weightedState.weights, weights) {
 		return
@@ -160,6 +168,7 @@ func newAuthScheduler(selector Selector) *authScheduler {
 		authGenerations:     make(map[string]scheduledGenerationMeta),
 		mixedCursors:        make(map[string]int),
 		mixedWeightedStates: make(map[string]*smoothWeightedState),
+		mixedSticky:         make(map[string]string),
 	}
 }
 
@@ -168,6 +177,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *StickyRoundRobinSelector:
+		return schedulerStrategyStickyRoundRobin
 	case *WeightedRoundRobinSelector:
 		return schedulerStrategyWeightedRoundRobin
 	case nil, *RoundRobinSelector:
@@ -186,6 +197,7 @@ func (s *authScheduler) setSelector(selector Selector) {
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
+	clear(s.mixedSticky)
 	clear(s.mixedWeightedStates)
 }
 
@@ -297,6 +309,7 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 		s.authGenerations = make(map[string]scheduledGenerationMeta)
 	}
 	s.mixedCursors = make(map[string]int)
+	s.mixedSticky = make(map[string]string)
 	s.mixedWeightedStates = make(map[string]*smoothWeightedState)
 	now := time.Now()
 	for _, auth := range auths {
@@ -517,6 +530,11 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
+	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
+	if strategy == schedulerStrategyStickyRoundRobin {
+		return s.pickMixedStickyLocked(normalized, candidateShards, bestPriority, cursorKey, predicate)
+	}
+
 	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
@@ -531,7 +549,6 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
 	if strategy == schedulerStrategyWeightedRoundRobin {
 		entries := make([]*scheduledAuth, 0)
 		for _, shard := range candidateShards {
@@ -567,7 +584,6 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
-
 	weights := make([]int, len(normalized))
 	segmentStarts := make([]int, len(normalized))
 	segmentEnds := make([]int, len(normalized))
@@ -621,6 +637,91 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+}
+
+type mixedReadyCandidate struct {
+	providerKey string
+	auth        *Auth
+	stickyKey   string
+}
+
+func mixedStickyKey(providerKey, authID string) string {
+	return providerKey + "\x00" + authID
+}
+
+func (s *authScheduler) pickMixedStickyLocked(normalized []string, candidateShards []*modelScheduler, bestPriority int, cursorKey string, predicate func(*scheduledAuth) bool) (*Auth, string, error) {
+	candidates := make([]mixedReadyCandidate, 0)
+	for providerIndex, providerKey := range normalized {
+		shard := candidateShards[providerIndex]
+		if shard == nil {
+			continue
+		}
+		entries := shard.readyEntriesAtPriorityLocked(false, bestPriority, predicate)
+		for _, entry := range entries {
+			if entry == nil || entry.auth == nil {
+				continue
+			}
+			candidates = append(candidates, mixedReadyCandidate{
+				providerKey: providerKey,
+				auth:        entry.auth,
+				stickyKey:   mixedStickyKey(providerKey, entry.auth.ID),
+			})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, "", &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	if s.mixedSticky == nil {
+		s.mixedSticky = make(map[string]string)
+	}
+	if s.mixedCursors == nil {
+		s.mixedCursors = make(map[string]int)
+	}
+	stickyKey := s.mixedSticky[cursorKey]
+	if stickyKey != "" {
+		for _, candidate := range candidates {
+			if candidate.stickyKey == stickyKey {
+				if selectedIndex := bestMixedStickyCandidateIndex(candidates); selectedIndex >= 0 {
+					selected := candidates[selectedIndex]
+					if stickyCandidateShouldSwitch(selected.auth, candidate.auth) {
+						s.mixedSticky[cursorKey] = selected.stickyKey
+						s.mixedCursors[cursorKey] = selectedIndex + 1
+						return selected.auth, selected.providerKey, nil
+					}
+				}
+				return candidate.auth, candidate.providerKey, nil
+			}
+		}
+	}
+	selectedIndex := bestMixedStickyCandidateIndex(candidates)
+	if selectedIndex < 0 {
+		return nil, "", &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+	selected := candidates[selectedIndex]
+	s.mixedCursors[cursorKey] = selectedIndex + 1
+	s.mixedSticky[cursorKey] = selected.stickyKey
+	return selected.auth, selected.providerKey, nil
+}
+
+func bestMixedStickyCandidateIndex(candidates []mixedReadyCandidate) int {
+	best := -1
+	for index, candidate := range candidates {
+		if candidate.auth == nil {
+			continue
+		}
+		if best < 0 {
+			best = index
+			continue
+		}
+		if !quotaRankingKnown(candidate.auth) && !quotaRankingKnown(candidates[best].auth) {
+			continue
+		}
+		compared := compareQuotaForSticky(candidate.auth, candidates[best].auth)
+		if compared < 0 || compared == 0 && candidate.stickyKey < candidates[best].stickyKey {
+			best = index
+		}
+	}
+	return best
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -1376,6 +1477,8 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	switch strategy {
 	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
+	case schedulerStrategyStickyRoundRobin:
+		picked = view.pickStickyRoundRobin(predicate)
 	case schedulerStrategyWeightedRoundRobin:
 		picked = view.pickWeighted(predicate)
 	default:
@@ -1385,6 +1488,28 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 		return nil
 	}
 	return picked.auth
+}
+
+func (m *modelScheduler) readyEntriesAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) []*scheduledAuth {
+	if m == nil {
+		return nil
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return nil
+	}
+	view := &bucket.all
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
+		view = &bucket.ws
+	}
+	out := make([]*scheduledAuth, 0, len(view.flat))
+	for _, entry := range view.flat {
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, predicate func(*scheduledAuth) bool) int {
@@ -1677,6 +1802,63 @@ func scheduledSuccessorIndex(entries []*scheduledAuth, lastID string) int {
 		return 0
 	}
 	return index
+}
+
+// pickStickyRoundRobin keeps returning the sticky auth while it is ready. Once
+// that auth leaves the ready view, it advances to the next auth in stable order.
+func (v *readyView) pickStickyRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if len(v.flat) == 0 {
+		return nil
+	}
+	if v.stickyAuthID != "" {
+		for _, entry := range v.flat {
+			if entry == nil || entry.auth == nil || entry.auth.ID != v.stickyAuthID {
+				continue
+			}
+			if predicate == nil || predicate(entry) {
+				if selected := v.bestStickyEntry(predicate); selected != nil {
+					if stickyCandidateShouldSwitch(selected.auth, entry.auth) {
+						v.stickyAuthID = selected.auth.ID
+						v.lastPicked = selected.auth.ID
+						return selected
+					}
+				}
+				return entry
+			}
+		}
+	}
+	if selected := v.bestStickyEntry(predicate); selected != nil {
+		v.stickyAuthID = selected.auth.ID
+		v.lastPicked = selected.auth.ID
+		return selected
+	}
+	return nil
+}
+
+func (v *readyView) bestStickyEntry(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	var best *scheduledAuth
+	for _, entry := range v.flat {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		if best == nil || compareQuotaForSticky(entry.auth, best.auth) < 0 {
+			best = entry
+		}
+	}
+	return best
+}
+
+func stickyCandidateShouldSwitch(candidate, current *Auth) bool {
+	if candidate == nil || current == nil || candidate.ID == current.ID {
+		return false
+	}
+	if !quotaRankingKnown(candidate) && !quotaRankingKnown(current) {
+		return false
+	}
+	return compareQuotaForSticky(candidate, current) < 0
 }
 
 // pickWeighted returns the next ready entry using smooth weighted round-robin.
