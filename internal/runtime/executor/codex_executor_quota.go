@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
@@ -133,6 +134,7 @@ func (e *CodexExecutor) ProbeQuotaCountdown(ctx context.Context, auth *cliproxya
 		return nil, fmt.Errorf("codex quota probe: no supported model")
 	}
 	body := codexQuotaProbePayload(model)
+	requestedAt := time.Now()
 	url := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -150,6 +152,26 @@ func (e *CodexExecutor) ProbeQuotaCountdown(ctx context.Context, auth *cliproxya
 		}
 	}()
 	data, err := io.ReadAll(httpResp.Body)
+	// This internal POST generates tokens too, but has no billable client key.
+	// Account it directly so quota probes cannot bypass a credential's dollar cap.
+	detail := helps.ParseOpenAIUsage(data)
+	if parsed, ok := helps.ParseCodexUsage(data); ok && (parsed.TotalTokens > 0 || detail.TotalTokens == 0) {
+		detail = parsed
+	}
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		if parsed, ok := helps.ParseCodexUsage(bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))); ok && (parsed.TotalTokens > 0 || detail.TotalTokens == 0) {
+			detail = parsed
+		}
+	}
+	usage.RecordAuthUsage(ctx, usage.Record{
+		AuthIndex: auth.Clone().EnsureIndex(), Provider: "codex", ExecutorType: "CodexExecutor",
+		Model: model, RequestedAt: requestedAt, Detail: detail, ResponseServiceTier: detail.ResponseServiceTier,
+		ServiceTier: usage.DefaultServiceTier, ResponseHeaders: httpResp.Header,
+		Failed: err != nil || httpResp.StatusCode < 200 || httpResp.StatusCode >= 300,
+	})
 	if err != nil {
 		return nil, err
 	}

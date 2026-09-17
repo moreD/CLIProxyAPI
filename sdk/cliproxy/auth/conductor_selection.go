@@ -110,6 +110,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
+	if blocked, _ := authCostBlocked(auth, time.Now()); blocked {
+		return false
+	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {
 		return false
 	}

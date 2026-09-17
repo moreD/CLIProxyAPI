@@ -876,6 +876,21 @@ func (s *StickyRoundRobinSelector) ensureKeyCapacity(key string, limit int) {
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
+	if auth != nil && !auth.Disabled && auth.Status != StatusDisabled {
+		if blocked, reset := authCostBlocked(auth, now); blocked {
+			if !reset.IsZero() {
+				return true, blockReasonCooldown, reset
+			}
+			return true, blockReasonOther, time.Time{}
+		}
+	}
+	return isAuthProviderBlockedForModel(auth, model, now)
+}
+
+// Provider availability can be cached by the scheduler. Local dollar budgets
+// are checked by its request predicate because usage observations can reset
+// them without changing the auth snapshot or its generation.
+func isAuthProviderBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}

@@ -1,15 +1,60 @@
 package executor
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/authusage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
+
+func TestCodexQuotaProbeAccountsGeneratedTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"json", `{"service_tier":"priority","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}`, 200},
+		{"stream", "data: {\"type\":\"response.completed\",\"response\":{\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20,\"total_tokens\":120}}}\n\ndata: [DONE]\n\n", 200},
+		{"failed with usage", `{"service_tier":"priority","usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}`, 429},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := authusage.NewStore(filepath.Join(t.TempDir(), "auth.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			restore := authusage.SetDefault(store)
+			t.Cleanup(func() { restore(); _ = store.Close() })
+			var model string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, _ := io.ReadAll(r.Body)
+				model = gjson.GetBytes(data, "model").String()
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+			auth := &cliproxyauth.Auth{ID: "quota-probe", Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}
+			_, err = NewCodexExecutor(&config.Config{}).ProbeQuotaCountdown(context.Background(), auth)
+			if (err != nil) != (tc.status >= 300) {
+				t.Fatalf("probe error: %v", err)
+			}
+			want := billing.Price(model, "priority", billing.Tokens{Input: 100, Output: 20}, true)
+			if state := store.Snapshot(auth.EnsureIndex(), time.Now()); state.CostUSD != want || state.TotalCostUSD != want {
+				t.Fatalf("probe accounting = %+v, want %v", state, want)
+			}
+		})
+	}
+}
 
 func TestParseCodexWorkspaceNames(t *testing.T) {
 	t.Parallel()

@@ -567,6 +567,9 @@ func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliprox
 		matchesCredential := credentialID == "" || key.credentialID == credentialID
 		matchesRoute := validRouteModel && key.routeModel == routeModel
 		_, excluded := excludedAuthIDs[strings.TrimSpace(key.credentialID)]
+		if blocked, _ := authCostBlocked(selection.CloneAuth(), time.Now()); blocked {
+			excluded = true
+		}
 		if !fallbackAttempt && !excluded && matchesCredential && selection.Active() && matchesRoute && retained == nil {
 			retained = selection
 			continue
@@ -1179,6 +1182,10 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	} else {
 		auth.EnsureIndex()
 	}
+	if blocked, _ := authCostBlocked(&auth, time.Now()); blocked {
+		endScope()
+		return nil, authCostLimitError()
+	}
 
 	executor, okExecutor := m.Executor(executorKey)
 	if !okExecutor && auth.Attributes != nil && strings.TrimSpace(auth.Attributes["base_url"]) != "" {
@@ -1280,6 +1287,9 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	m.mu.RLock()
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
+			continue
+		}
+		if blocked, _ := authCostBlocked(auth, time.Now()); blocked {
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
@@ -1416,6 +1426,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
+			if blocked, _ := authCostBlocked(c.auth, time.Now()); blocked {
+				break
+			}
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts}

@@ -1316,7 +1316,7 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	entry.meta = meta
 	entry.auth = meta.auth
 	entry.nextRetryAt = time.Time{}
-	blocked, reason, next := isAuthBlockedForModel(meta.auth, m.modelKey, now)
+	blocked, reason, next := isAuthProviderBlockedForModel(meta.auth, m.modelKey, now)
 	switch {
 	case !blocked:
 		entry.state = scheduledStateReady
@@ -1359,7 +1359,7 @@ func (m *modelScheduler) demoteExpiredTokensLocked(now time.Time) bool {
 			continue
 		}
 		if exp, ok := entry.auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
-			blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
+			blocked, reason, next := isAuthProviderBlockedForModel(entry.auth, m.modelKey, now)
 			if blocked {
 				switch {
 				case reason == blockReasonCooldown:
@@ -1393,7 +1393,7 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 		if entry.nextRetryAt.IsZero() || entry.nextRetryAt.After(now) {
 			continue
 		}
-		blocked, reason, next := isAuthBlockedForModel(entry.auth, m.modelKey, now)
+		blocked, reason, next := isAuthProviderBlockedForModel(entry.auth, m.modelKey, now)
 		switch {
 		case !blocked:
 			entry.state = scheduledStateReady

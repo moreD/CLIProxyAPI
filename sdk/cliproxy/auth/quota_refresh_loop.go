@@ -151,6 +151,11 @@ func (m *Manager) refreshQuotaAuthAttempt(ctx context.Context, authID string, fo
 	if !weeklyQuotaWindowRefreshed(previousQuota, quota) {
 		return stored
 	}
+	// Countdown probing generates tokens; quota metadata GETs above remain
+	// available while a dollar cap is exhausted so its reset can be discovered.
+	if blocked, _ := authCostBlocked(auth, time.Now()); blocked {
+		return stored
+	}
 	log.WithField("auth_id", authID).Info("codex quota probe started")
 	probeQuota, probeErr := refresher.ProbeQuotaCountdown(ctx, auth)
 	if probeQuota != nil && probeQuota.HasAny() {
@@ -347,6 +352,7 @@ func (m *Manager) storeQuotaRefreshResult(ctx context.Context, authID string, qu
 	if snapshot == nil {
 		return merged
 	}
+	_ = ObserveAuthCostWindow(snapshot, seenAt)
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}
@@ -378,6 +384,7 @@ func (m *Manager) storeProbeResult(ctx context.Context, authID string, quota *Qu
 	if snapshot == nil {
 		return merged
 	}
+	_ = ObserveAuthCostWindow(snapshot, probedAt)
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot)
 	}

@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/authusage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -49,6 +51,17 @@ func (s *Service) Run(ctx context.Context) error {
 		s.homeMu.Unlock()
 	}()
 
+	authCosts, errAuthCosts := authusage.NewStore(filepath.Join(redisqueue.UsageStatsPersistenceDirectory(), "auth-usage", "auth-usage.sqlite"))
+	if errAuthCosts != nil {
+		return fmt.Errorf("initialize auth dollar accounting: %w", errAuthCosts)
+	}
+	restoreAuthCosts := authusage.SetDefault(authCosts)
+	defer func() {
+		restoreAuthCosts()
+		if errClose := authCosts.Close(); errClose != nil {
+			log.Errorf("close auth dollar accounting: %v", errClose)
+		}
+	}()
 	usage.StartDefault(ctx)
 	if s.cfg != nil {
 		redisqueue.SetUsageStatisticsEnabled(s.cfg.UsageStatisticsEnabled)
@@ -63,9 +76,9 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	redisqueue.StartUsageStatsPersistence(ctx)
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
 		}

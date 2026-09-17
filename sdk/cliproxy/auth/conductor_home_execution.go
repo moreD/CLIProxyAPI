@@ -239,6 +239,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return selection.Executor.Execute(execCtx, preparedAuth, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
+			if blocked, _ := authCostBlocked(preparedAuth, startHomeExec); blocked {
+				lastErr = authCostLimitError()
+				break
+			}
 			response, errExecute = execute()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
