@@ -404,6 +404,9 @@ func TestRecoveryFailureFailsClosedAndPreventsFlushOverwrite(t *testing.T) {
 	if err := FlushUsageStats(); err == nil {
 		t.Fatal("FlushUsageStats() succeeded after recovery failure")
 	}
+	if _, available := ClientUsageSnapshotNow("limited-key"); available {
+		t.Fatal("client usage lookup succeeded after recovery failure")
+	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
