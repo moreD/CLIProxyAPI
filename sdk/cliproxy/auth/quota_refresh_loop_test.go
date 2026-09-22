@@ -87,7 +87,7 @@ func (e *quotaRefreshTestExecutor) ProbeQuotaCountdown(_ context.Context, auth *
 }
 
 func TestStoreWorkspaceNamesUpdatesMatchingCodexAuths(t *testing.T) {
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	for _, auth := range []*Auth{
 		{ID: "team-a", Provider: "codex", Metadata: map[string]any{"account_id": "acct-a"}},
 		{ID: "team-b", Provider: "codex", Metadata: map[string]any{"account_id": "acct-b", MetadataWorkspaceName: "Old Name"}},
@@ -147,7 +147,7 @@ func TestStartAutoRefreshStartsQuotaRefreshLoop(t *testing.T) {
 			quota: testQuota(now.Add(time.Hour), 17),
 		}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:       "oauth",
@@ -183,7 +183,7 @@ func TestRegisterRefreshesQuotaImmediatelyAfterAutoRefreshStarts(t *testing.T) {
 			quota: testQuota(now.Add(time.Hour), 21),
 		}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -224,7 +224,7 @@ func TestCredentialUpdateForcesFreshQuotaRefresh(t *testing.T) {
 			quota: testQuota(now.Add(2*time.Hour), 34),
 		}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:              "oauth",
@@ -304,7 +304,7 @@ func TestQuotaRefreshLoopFiltersAndStoresProbeQuota(t *testing.T) {
 			quota: testQuota(now.Add(2*time.Hour), 90),
 		}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	entries := []*Auth{
 		{ID: "oauth", Provider: "codex", Metadata: map[string]any{"email": "a@example.com"}},
@@ -344,7 +344,7 @@ func TestQuotaRefreshLoopSkipsFreshStoredQuota(t *testing.T) {
 
 	now := time.Now()
 	exec := &quotaRefreshTestExecutor{}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:              "oauth",
@@ -379,7 +379,7 @@ func TestRefreshQuotaAsyncStoresQuotaForSchedulerSelection(t *testing.T) {
 			quota: testQuota(now.Add(time.Hour), 5),
 		}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:              "used",
@@ -439,7 +439,7 @@ func TestQuotaRefreshLoopProbesOnlyWhenWeeklyWindowRefreshes(t *testing.T) {
 	exec := &quotaRefreshTestExecutor{
 		refreshQueue: []quotaRefreshResult{{quota: newQuota}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:              "oauth",
@@ -475,7 +475,7 @@ func TestQuotaRefreshLoopProbesWhenWeeklyWindowAdvances(t *testing.T) {
 		refreshQueue: []quotaRefreshResult{{quota: newQuota}},
 		probeQueue:   []quotaProbeResult{{quota: newQuota}},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:              "oauth",
@@ -512,7 +512,7 @@ func TestQuotaRefreshLoopRetriesOnceAndPreservesPreviousQuota(t *testing.T) {
 			{err: fmt.Errorf("temporary refresh failure again")},
 		},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:           "oauth",
@@ -550,7 +550,7 @@ func TestQuotaRefreshLoopClearsPreviousRefreshErrorOnSuccess(t *testing.T) {
 	exec := &quotaRefreshTestExecutor{refreshQueue: []quotaRefreshResult{{
 		quota: testFiveHourQuota(now.Add(time.Hour), 25),
 	}}}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:                      "oauth",
@@ -582,7 +582,7 @@ func TestQuotaRefreshLoopUnauthorizedRefreshStopsFutureRefresh(t *testing.T) {
 			{err: fmt.Errorf("should not be retried")},
 		},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:       "oauth",
@@ -633,7 +633,7 @@ func TestQuotaRefreshLoopUnauthorizedProbeStopsFutureRefresh(t *testing.T) {
 			{err: fmt.Errorf("codex quota probe: status 401: invalidated")},
 		},
 	}
-	manager := NewManager(nil, &StickyRoundRobinSelector{}, nil)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), &Auth{
 		ID:       "oauth",
