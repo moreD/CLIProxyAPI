@@ -1101,11 +1101,11 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if !strings.Contains(codexUserAgent, "(codex-tui;") {
 		t.Fatalf("default Codex User-Agent = %s, want codex-tui suffix", codexUserAgent)
 	}
-	if !strings.Contains(codexUserAgent, "codex-tui/0.153.0") || !strings.Contains(codexUserAgent, "(codex-tui; 0.153.0)") {
-		t.Fatalf("default Codex User-Agent = %s, want v0.153.0 identity", codexUserAgent)
+	if !strings.Contains(codexUserAgent, "codex-tui/0.154.0") || !strings.Contains(codexUserAgent, "(codex-tui; 0.154.0)") {
+		t.Fatalf("default Codex User-Agent = %s, want v0.154.0 identity", codexUserAgent)
 	}
-	if !strings.Contains(codexUserAgent, "Mac OS 26.6.2") {
-		t.Fatalf("default Codex User-Agent = %s, want Mac OS 26.6.2", codexUserAgent)
+	if !strings.Contains(codexUserAgent, "Mac OS 26.5.2") {
+		t.Fatalf("default Codex User-Agent = %s, want Mac OS 26.5.2", codexUserAgent)
 	}
 	if got := headers.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %s, want %s", got, codexOriginator)
