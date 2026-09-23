@@ -477,7 +477,7 @@ func TestUsageQueuePluginRecordsStatsForTokenLimitsWhenQueueDisabled(t *testing.
 	SetEnabled(false)
 	SetUsageStatisticsEnabled(false)
 	SetClientCostLimits([]config.APIKeyEntry{
-		{APIKey: "limited-key", CostLimits: config.APIKeyCostLimits{TwelveHour: billing.USD(1_000_000)}},
+		{APIKey: "limited-key", CostLimits: config.APIKeyCostLimits{TwelveHour: billing.USD(400_000)}},
 	})
 	ClearUsageStats()
 	t.Cleanup(func() {
@@ -491,6 +491,7 @@ func TestUsageQueuePluginRecordsStatsForTokenLimitsWhenQueueDisabled(t *testing.
 	plugin.HandleUsage(context.Background(), coreusage.Record{
 		APIKey:      "limited-key",
 		RequestedAt: time.Now().UTC(),
+		Model:       "gpt-5.6-sol",
 		Detail: coreusage.Detail{
 			InputTokens: 100,
 			TotalTokens: 100,
@@ -498,8 +499,8 @@ func TestUsageQueuePluginRecordsStatsForTokenLimitsWhenQueueDisabled(t *testing.
 	})
 
 	decision := CheckClientCostLimit("limited-key", time.Now())
-	if !decision.Exceeded || decision.Window != "12h" || decision.Used != billing.USD(1_000_000) {
-		t.Fatalf("decision = %+v, want exceeded 12h at $0.001000000", decision)
+	if !decision.Exceeded || decision.Window != "12h" || decision.Used != billing.USD(400_000) {
+		t.Fatalf("decision = %+v, want exceeded 12h at $0.000400000", decision)
 	}
 	if queued := PopOldest(10); len(queued) != 0 {
 		t.Fatalf("queue records = %d, want 0 when queue disabled", len(queued))

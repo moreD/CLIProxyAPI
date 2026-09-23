@@ -10,6 +10,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/authusage"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/billing"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -62,6 +63,12 @@ func (s *Service) Run(ctx context.Context) error {
 			log.Errorf("close auth dollar accounting: %v", errClose)
 		}
 	}()
+	billing.StartPriceRefresh(ctx, func() string {
+		if s.cfg == nil {
+			return ""
+		}
+		return s.cfg.ProxyURL
+	}())
 	usage.StartDefault(ctx)
 	if s.cfg != nil {
 		redisqueue.SetUsageStatisticsEnabled(s.cfg.UsageStatisticsEnabled)
